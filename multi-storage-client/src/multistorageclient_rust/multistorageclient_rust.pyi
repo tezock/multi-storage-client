@@ -22,13 +22,28 @@ class RustClient:
     RustClient provides asynchronous methods for interacting with an object storage backend (e.g., S3).
     """
     def __init__(
-        self, provider: str = "s3", configs: dict | None = ..., credentials_provider: Any | None = ...
+        self,
+        provider: str = "s3",
+        configs: dict | None = ...,
+        credentials_provider: Any | None = ...,
+        retry: RustRetryConfig | None = ...,
     ) -> None:
         """
         Initialize a RustClient instance.
         :param provider: The storage provider type (default: 's3').
         :param configs: Configuration dictionary for the provider (e.g., bucket, endpoint_url).
+            Supported config keys:
+            - bucket: Bucket name for the storage provider
+            - endpoint_url: Custom endpoint URL
+            - region_name: AWS region name (S3 only)
+            - allow_http: Allow HTTP connections (default: False)
+            - skip_signature: Skip request signing for public buckets (default: False)
+            - max_concurrency: Maximum concurrent operations (default: 8)
+            - multipart_chunksize: Chunk size for multipart operations (default: 32MB)
+            - connect_timeout: Connection timeout in seconds (default: 60)
+            - read_timeout: Read timeout in seconds (default: 120)
         :param credentials_provider: Credentials provider for the provider (e.g., StaticS3CredentialsProvider).
+        :param retry: Retry configuration for the Rust client.
         """
         ...
 
@@ -211,3 +226,35 @@ class RustClientError(Exception):
     """
 
     ...
+
+class RustRetryConfig:
+    """
+    Retry configuration for Rust client operations.
+
+    Maps to object_store's RetryConfig with BackoffConfig.
+    """
+
+    attempts: int
+    timeout: int
+    init_backoff_ms: int
+    max_backoff: int
+    backoff_multiplier: float
+
+    def __init__(
+        self,
+        attempts: int = 10,
+        timeout: int = 180,
+        init_backoff_ms: int = 100,
+        max_backoff: int = 15,
+        backoff_multiplier: float = 2.0,
+    ) -> None:
+        """
+        Initialize RustRetryConfig.
+
+        :param attempts: Maximum number of retry attempts (default: 10)
+        :param timeout: Total timeout for all retries in seconds (default: 180)
+        :param init_backoff_ms: Initial backoff delay in milliseconds (default: 100)
+        :param max_backoff: Maximum backoff delay in seconds (default: 15)
+        :param backoff_multiplier: Exponential backoff multiplier (default: 2.0)
+        """
+        ...

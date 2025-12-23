@@ -34,7 +34,7 @@ from google.oauth2.credentials import Credentials as OAuth2Credentials
 
 from multistorageclient_rust import RustClient, RustClientError, RustRetryableError
 
-from ..rust_utils import run_async_rust_client_method
+from ..rust_utils import parse_retry_config, run_async_rust_client_method
 from ..telemetry import Telemetry
 from ..types import (
     AWARE_DATETIME_MIN,
@@ -259,6 +259,9 @@ class GoogleStorageProvider(BaseStorageProvider):
             return None
         configs = dict(rust_client_options) if rust_client_options else {}
 
+        # Extract and parse retry configuration
+        retry_config = parse_retry_config(configs)
+
         if "application_credentials" not in configs and os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
             configs["application_credentials"] = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
         if "service_account_key" not in configs and os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY"):
@@ -278,6 +281,7 @@ class GoogleStorageProvider(BaseStorageProvider):
         return RustClient(
             provider=PROVIDER,
             configs=configs,
+            retry=retry_config,
         )
 
     def _refresh_gcs_client_if_needed(self) -> None:

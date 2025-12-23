@@ -63,3 +63,34 @@ pub struct ByteRangeLike {
     #[pyo3(attribute)]
     pub size: u64,
 }
+
+#[pyclass(get_all, set_all)]
+#[derive(Clone, Debug)]
+pub struct RustRetryConfig {
+    pub attempts: usize,
+    pub timeout: u64,
+    pub init_backoff_ms: u64,
+    pub max_backoff: u64,
+    pub backoff_multiplier: f64,
+}
+
+#[pymethods]
+impl RustRetryConfig {
+    #[new]
+    #[pyo3(signature = (attempts=10, timeout=180, init_backoff_ms=100, max_backoff=15, backoff_multiplier=2.0))]
+    fn new(
+        attempts: usize,
+        timeout: u64,
+        init_backoff_ms: u64,
+        max_backoff: u64,
+        backoff_multiplier: f64,
+    ) -> Self {
+        Self {
+            attempts,
+            timeout,
+            init_backoff_ms,
+            max_backoff,
+            backoff_multiplier,
+        }
+    }
+}

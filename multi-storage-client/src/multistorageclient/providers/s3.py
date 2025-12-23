@@ -29,7 +29,7 @@ from botocore.session import get_session
 
 from multistorageclient_rust import RustClient, RustClientError, RustRetryableError
 
-from ..rust_utils import run_async_rust_client_method
+from ..rust_utils import parse_retry_config, run_async_rust_client_method
 from ..telemetry import Telemetry
 from ..types import (
     AWARE_DATETIME_MIN,
@@ -265,6 +265,9 @@ class S3StorageProvider(BaseStorageProvider):
         """
         configs = dict(rust_client_options) if rust_client_options else {}
 
+        # Extract and parse retry configuration
+        retry_config = parse_retry_config(configs)
+
         if self._region_name and "region_name" not in configs:
             configs["region_name"] = self._region_name
 
@@ -283,6 +286,7 @@ class S3StorageProvider(BaseStorageProvider):
             provider=PROVIDER,
             configs=configs,
             credentials_provider=self._credentials_provider,
+            retry=retry_config,
         )
 
     def _fetch_credentials(self) -> dict:

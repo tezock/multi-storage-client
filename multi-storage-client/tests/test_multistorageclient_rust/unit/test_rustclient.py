@@ -32,6 +32,7 @@ from multistorageclient_rust import (  # pyright: ignore[reportAttributeAccessIs
     RustClient,
     RustClientError,
     RustRetryableError,
+    RustRetryConfig,
 )
 
 from .utils import RefreshableTestCredentialsProvider
@@ -155,6 +156,14 @@ async def test_rustclient_basic_operations(temp_data_store_type: Type[tempdatast
             secret_key=config_dict["credentials_provider"]["options"]["secret_key"],
         )
 
+        retry_config = RustRetryConfig(
+            attempts=5,
+            timeout=60,
+            init_backoff_ms=1000,
+            max_backoff=10,
+            backoff_multiplier=2.0,
+        )
+
         rust_client = RustClient(
             provider="s3",
             configs={
@@ -165,6 +174,7 @@ async def test_rustclient_basic_operations(temp_data_store_type: Type[tempdatast
                 "multipart_chunksize": 10 * 1024 * 1024,
             },
             credentials_provider=credentials_provider,
+            retry=retry_config,
         )
 
         # Create a storage client as well for operations that are not supported by the Rust client

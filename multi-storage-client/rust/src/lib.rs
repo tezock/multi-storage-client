@@ -17,6 +17,7 @@ use chrono::{DateTime, Utc};
 use object_store::aws::AmazonS3Builder;
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::RetryConfig;
+use object_store::BackoffConfig;
 use object_store::{path::Path, ObjectMeta, ObjectStore, PutPayload, WriteMultipart};
 use object_store::ClientOptions;
 use object_store::limit::LimitStore;
@@ -30,6 +31,7 @@ use std::collections::{HashMap, VecDeque};
 use std::error::Error as StdError;
 use std::path::Path as StdPath;
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::NamedTempFile;
 use thiserror::Error;
 use tokio::fs;
@@ -43,7 +45,7 @@ mod credentials;
 mod types;
 
 use credentials::{AwsSdkCredentialsProvider, PyCredentialsProvider};
-use types::{ByteRangeLike, ListResult, ObjectMetadata};
+use types::{ByteRangeLike, ListResult, ObjectMetadata, RustRetryConfig};
 
 pyo3::create_exception!(multistorageclient_rust, RustRetryableError, PyException);
 pyo3::create_exception!(multistorageclient_rust, RustClientError, PyException);
@@ -170,6 +172,14 @@ const DEFAULT_READ_TIMEOUT: u64 = 120;
 const DEFAULT_POOL_IDLE_TIMEOUT: u64 = 30;
 const DEFAULT_POOL_CONNECTIONS: usize = 64;
 
+// Retry configuration defaults
+// https://docs.rs/object_store/0.12.4/src/object_store/client/retry.rs.html#248
+const DEFAULT_RETRY_MAX_RETRIES: usize = 10;
+const DEFAULT_RETRY_TIMEOUT: u64 = 180;
+const DEFAULT_RETRY_INIT_BACKOFF_MS: u64 = 100;
+const DEFAULT_RETRY_MAX_BACKOFF: u64 = 15;
+const DEFAULT_RETRY_BACKOFF_BASE: f64 = 2.0;
+
 fn get_timeout_secs(configs: &HashMap<String, ConfigValue>, key: &str, default: u64) -> u64 {
     configs.get(key)
         .map(|val| match val {
@@ -180,18 +190,48 @@ fn get_timeout_secs(configs: &HashMap<String, ConfigValue>, key: &str, default: 
         .unwrap_or(default)
 }
 
+fn get_retry_config(retry_config: Option<&RustRetryConfig>) -> RetryConfig {
+    if let Some(rust_retry_config) = retry_config {
+        let backoff_config = BackoffConfig {
+            init_backoff: Duration::from_millis(rust_retry_config.init_backoff_ms),
+            max_backoff: Duration::from_secs(rust_retry_config.max_backoff),
+            base: rust_retry_config.backoff_multiplier,
+        };
+        
+        RetryConfig {
+            backoff: backoff_config,
+            max_retries: rust_retry_config.attempts,
+            retry_timeout: Duration::from_secs(rust_retry_config.timeout),
+        }
+    } else {
+        // Use defaults if no retry config provided
+        let backoff_config = BackoffConfig {
+            init_backoff: Duration::from_millis(DEFAULT_RETRY_INIT_BACKOFF_MS),
+            max_backoff: Duration::from_secs(DEFAULT_RETRY_MAX_BACKOFF),
+            base: DEFAULT_RETRY_BACKOFF_BASE,
+        };
+        
+        RetryConfig {
+            backoff: backoff_config,
+            max_retries: DEFAULT_RETRY_MAX_RETRIES,
+            retry_timeout: Duration::from_secs(DEFAULT_RETRY_TIMEOUT),
+        }
+    }
+}
+
 fn create_store(
     provider: &str,
     configs: Option<&HashMap<String, ConfigValue>>,
     credentials_provider: Option<&PyCredentialsProvider>,
     max_pool_connections: usize,
+    retry_config: Option<&RustRetryConfig>,
 ) -> PyResult<Arc<dyn ObjectStore>> {
     let store = match provider {
         "s3" | "s8k" | "gcs_s3" => {
-            build_s3_store(configs, credentials_provider)?
+            build_s3_store(configs, credentials_provider, retry_config)?
         }
         "gcs" => {
-            build_gcs_store(configs, credentials_provider)?
+            build_gcs_store(configs, credentials_provider, retry_config)?
         }
         _ => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -240,6 +280,7 @@ fn parse_path(path: &str) -> Result<Path, StorageError> {
 fn build_s3_store<'a>(
     configs: Option<&'a HashMap<String, ConfigValue>>,
     credentials_provider: Option<&PyCredentialsProvider>,
+    retry_config: Option<&RustRetryConfig>,
 ) -> PyResult<Arc<dyn ObjectStore>> {
     // TODO: Add support for other configuration fields of AmazonS3Builder, full list here:
     // https://docs.rs/object_store/latest/src/object_store/aws/builder.rs.html#123
@@ -286,7 +327,8 @@ fn build_s3_store<'a>(
     }
 
     // Configure retry
-    builder = builder.with_retry(RetryConfig::default());
+    let retry_cfg = get_retry_config(retry_config);
+    builder = builder.with_retry(retry_cfg);
 
     // Configure client options
     let mut client_options = ClientOptions::new();
@@ -325,6 +367,7 @@ fn build_s3_store<'a>(
 fn build_gcs_store<'a>(
     configs: Option<&'a HashMap<String, ConfigValue>>,
     _credentials_provider: Option<&PyCredentialsProvider>,
+    retry_config: Option<&RustRetryConfig>,
 ) -> PyResult<Arc<dyn ObjectStore>> {
     let mut builder = GoogleCloudStorageBuilder::new();
 
@@ -381,7 +424,8 @@ fn build_gcs_store<'a>(
     }
 
     // Configure retry
-    builder = builder.with_retry(RetryConfig::default());
+    let retry_cfg = get_retry_config(retry_config);
+    builder = builder.with_retry(retry_cfg);
 
     // Configure client options
     let mut client_options = ClientOptions::new();
@@ -428,11 +472,12 @@ pub struct RustClient {
 #[pymethods]
 impl RustClient {
     #[new]
-    #[pyo3(signature = (provider="s3", configs=None, credentials_provider=None))]
+    #[pyo3(signature = (provider="s3", configs=None, credentials_provider=None, retry=None))]
     fn new(
         provider: &str,
         configs: Option<&Bound<'_, PyDict>>,
         credentials_provider: Option<PyObject>,
+        retry: Option<RustRetryConfig>,
     ) -> PyResult<Self> {
         let provider = provider.to_lowercase();
         
@@ -486,6 +531,7 @@ impl RustClient {
             Some(&configs_map),
             py_creds_provider.as_ref(),
             max_pool_connections,
+            retry.as_ref(),
         )?;
         
         Ok(Self {
@@ -972,6 +1018,7 @@ fn multistorageclient_rust(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()>
     m.add_class::<RustClient>()?;
     m.add_class::<ObjectMetadata>()?;
     m.add_class::<ListResult>()?;
+    m.add_class::<RustRetryConfig>()?;
     m.add("RustRetryableError", _py.get_type::<RustRetryableError>())?;
     m.add("RustClientError", _py.get_type::<RustClientError>())?;
     Ok(())
@@ -1060,5 +1107,31 @@ mod tests {
         let with_spaces = "folder/file (with spaces).txt";
         let path = parse_path(with_spaces).unwrap();
         assert_eq!(path.to_string(), "folder/file (with spaces).txt");
+    }
+
+    #[test]
+    fn test_get_retry_config() {
+        // Test with RustRetryConfig
+        let rust_retry_cfg = RustRetryConfig {
+            attempts: 5,
+            timeout: 120,
+            init_backoff_ms: 200,
+            max_backoff: 10,
+            backoff_multiplier: 1.5,
+        };
+        let retry_config = get_retry_config(Some(&rust_retry_cfg));
+        assert_eq!(retry_config.max_retries, 5);
+        assert_eq!(retry_config.retry_timeout, Duration::from_secs(120));
+        assert_eq!(retry_config.backoff.init_backoff, Duration::from_millis(200));
+        assert_eq!(retry_config.backoff.max_backoff, Duration::from_secs(10));
+        assert_eq!(retry_config.backoff.base, 1.5);
+
+        // Test with defaults (no config)
+        let retry_config = get_retry_config(None);
+        assert_eq!(retry_config.max_retries, DEFAULT_RETRY_MAX_RETRIES);
+        assert_eq!(retry_config.retry_timeout, Duration::from_secs(DEFAULT_RETRY_TIMEOUT));
+        assert_eq!(retry_config.backoff.init_backoff, Duration::from_millis(DEFAULT_RETRY_INIT_BACKOFF_MS));
+        assert_eq!(retry_config.backoff.max_backoff, Duration::from_secs(DEFAULT_RETRY_MAX_BACKOFF));
+        assert_eq!(retry_config.backoff.base, DEFAULT_RETRY_BACKOFF_BASE);
     }
 }
