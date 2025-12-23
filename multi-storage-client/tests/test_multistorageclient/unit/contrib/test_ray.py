@@ -23,7 +23,7 @@ import ray
 
 from multistorageclient import StorageClient, StorageClientConfig
 from multistorageclient.contrib.ray import SharedEvent, SharedQueue
-from multistorageclient.sync import _SyncOp
+from multistorageclient.sync.producer import OperationType
 from multistorageclient.types import ExecutionMode, ObjectMetadata
 
 from ..utils import tempdatastore
@@ -70,7 +70,7 @@ def consumer(input_queue: SharedQueue, output_queue: SharedQueue):
     while True:
         op, metadata = input_queue.get()
         time.sleep(0.01)
-        if op == _SyncOp.STOP:
+        if op == OperationType.STOP:
             break
         output_queue.put((op, metadata))
         processed_count += 1
@@ -119,11 +119,11 @@ def test_ray_queue_producer_consumer(ray_cluster):
     # Producer runs in the main thread
     [
         input_queue.put(
-            (_SyncOp.ADD, ObjectMetadata(key=f"test_{i}", content_length=100, last_modified=datetime.now()))
+            (OperationType.ADD, ObjectMetadata(key=f"test_{i}", content_length=100, last_modified=datetime.now()))
         )
         for i in range(300)
     ]
-    [input_queue.put((_SyncOp.STOP, None)) for _ in range(4)]
+    [input_queue.put((OperationType.STOP, None)) for _ in range(4)]
     assert input_queue.qsize() == 304
 
     # Initialize 2 consumers

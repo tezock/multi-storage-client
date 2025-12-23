@@ -1,0 +1,406 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import importlib.util
+import logging
+import multiprocessing
+import queue
+import threading
+import time
+from typing import TYPE_CHECKING, Optional
+
+from ..progress_bar import ProgressBar
+from ..types import ExecutionMode
+from ..utils import PatternMatcher, calculate_worker_processes_and_threads
+from .monitors import ErrorMonitorThread, ResultMonitorThread
+from .producer import ProducerThread
+from .types import OperationType
+from .worker import _sync_worker_process
+
+if TYPE_CHECKING:
+    from ..client.types import AbstractStorageClient
+
+logger = logging.getLogger(__name__)
+
+
+def is_ray_available():
+    return importlib.util.find_spec("ray") is not None
+
+
+PLACEMENT_GROUP_STRATEGY = "SPREAD"
+PLACEMENT_GROUP_TIMEOUT_SECONDS = 60  # Timeout for placement group creation
+
+HAVE_RAY = is_ray_available()
+
+
+class SyncManager:
+    """
+    Manages the synchronization of files between two storage locations.
+
+    This class orchestrates the entire sync process, coordinating between producer
+    threads that identify files to sync, worker processes/threads that perform
+    the actual file operations, and monitor threads that update metadata.
+    """
+
+    def __init__(
+        self,
+        source_client: "AbstractStorageClient",
+        source_path: str,
+        target_client: "AbstractStorageClient",
+        target_path: str,
+    ):
+        self.source_client = source_client
+        self.target_client = target_client
+        self.source_path = source_path.lstrip("/")
+        self.target_path = target_path.lstrip("/")
+
+        same_client = source_client == target_client
+        # Profile check is necessary because source might be StorageClient facade while target is SingleStorageClient.
+        # NullStorageClient (used for delete through sync) doesn't have profile attribute so we need to explicitly check here.
+        if not same_client and hasattr(source_client, "profile") and hasattr(target_client, "profile"):
+            same_client = source_client.profile == target_client.profile
+
+        # Check for overlapping paths on same storage backend
+        if same_client and (source_path.startswith(target_path) or target_path.startswith(source_path)):
+            raise ValueError("Source and target paths cannot overlap on same StorageClient.")
+
+    def sync_objects(
+        self,
+        execution_mode: ExecutionMode = ExecutionMode.LOCAL,
+        description: str = "Syncing",
+        num_worker_processes: Optional[int] = None,
+        delete_unmatched_files: bool = False,
+        pattern_matcher: Optional[PatternMatcher] = None,
+        preserve_source_attributes: bool = False,
+        follow_symlinks: bool = True,
+        source_files: Optional[list[str]] = None,
+        ignore_hidden: bool = True,
+        commit_metadata: bool = True,
+    ):
+        """
+        Synchronize objects from source to target storage location.
+
+        This method performs the actual synchronization by coordinating producer
+        threads, worker processes/threads, and result monitor threads. It compares
+        files between source and target, copying new/modified files and optionally
+        deleting unmatched files from the target.
+
+        The sync process uses file metadata (etag, size, modification time) to
+        determine if files need to be copied. Files are processed in parallel
+        using configurable numbers of worker processes and threads.
+
+        :param execution_mode: Execution mode for sync operations.
+        :param description: Description text shown in the progress bar.
+        :param num_worker_processes: Number of worker processes to use. If None, automatically determined based on available CPU cores.
+        :param delete_unmatched_files: If True, files present in target but not in source will be deleted from target.
+        :param pattern_matcher: PatternMatcher instance for include/exclude filtering. If None, all files are included.
+        :param preserve_source_attributes: Whether to preserve source file metadata attributes during synchronization.
+            When False (default), only file content is copied. When True, custom metadata attributes are also preserved.
+
+            .. warning::
+                **Performance Impact**: When enabled without a ``metadata_provider`` configured, this will make a HEAD
+                request for each object to retrieve attributes, which can significantly impact performance on large-scale
+                sync operations. For production use at scale, configure a ``metadata_provider`` in your storage profile.
+        :param follow_symlinks: Whether to follow symbolic links. Only applicable when source is POSIX file storage. When False, symlinks are skipped during sync.
+        :param source_files: Optional list of file paths (relative to source_path) to sync. When provided, only these
+            specific files will be synced, skipping enumeration of the source path.
+        :param ignore_hidden: Whether to ignore hidden files and directories (starting with dot). Default is True.
+        :param commit_metadata: When True (default), calls :py:meth:`StorageClient.commit_metadata` after sync completes.
+            Set to False to skip the commit, allowing batching of multiple sync operations before committing manually.
+        :raises RuntimeError: If errors occur during sync operations. Exception message contains details of all errors encountered.
+            The sync operation will stop on the first error (fail-fast) and report all errors collected up to that point.
+        """
+        logger.debug(f"Starting sync operation {description}")
+
+        # Use provided pattern matcher for include/exclude filtering
+        if pattern_matcher and pattern_matcher.has_patterns():
+            logger.debug(f"Using pattern filtering: {pattern_matcher}")
+
+        # Attempt to balance the number of worker processes and threads.
+        num_worker_processes, num_worker_threads = calculate_worker_processes_and_threads(
+            num_worker_processes, execution_mode, self.source_client, self.target_client
+        )
+        num_workers = num_worker_processes * num_worker_threads
+
+        # Create the file and result queues.
+        if execution_mode == ExecutionMode.LOCAL:
+            if num_worker_processes == 1:
+                file_queue = queue.Queue()
+                result_queue = queue.Queue()
+                error_queue = queue.Queue()
+                shutdown_event = threading.Event()
+            else:
+                file_queue = multiprocessing.Queue()
+                result_queue = multiprocessing.Queue()
+                error_queue = multiprocessing.Queue()
+                shutdown_event = multiprocessing.Event()
+        else:
+            if not HAVE_RAY:
+                raise RuntimeError(
+                    "Ray execution mode requested but Ray is not installed. "
+                    "To use distributed sync with Ray, install it with: 'pip install ray'. "
+                    "Alternatively, use ExecutionMode.LOCAL for single-machine sync operations."
+                )
+
+            from ..contrib.ray.utils import SharedEvent, SharedQueue
+
+            file_queue = SharedQueue(maxsize=100000)
+            result_queue = SharedQueue()
+            error_queue = SharedQueue()
+            shutdown_event = SharedEvent()
+
+        # Create a progress bar to track the progress of the sync operation.
+        progress = ProgressBar(desc=description, show_progress=True, total_items=0)
+
+        # Start the producer thread to compare source and target file listings and queue sync operations.
+        producer_thread = ProducerThread(
+            self.source_client,
+            self.source_path,
+            self.target_client,
+            self.target_path,
+            progress,
+            file_queue,
+            num_workers,
+            shutdown_event,
+            delete_unmatched_files,
+            pattern_matcher,
+            preserve_source_attributes,
+            follow_symlinks,
+            source_files,
+            ignore_hidden,
+        )
+        producer_thread.start()
+
+        # Start the result monitor thread to process the results of individual sync operations
+        result_monitor_thread = ResultMonitorThread(
+            self.target_client,
+            self.target_path,
+            progress,
+            result_queue,
+        )
+        result_monitor_thread.start()
+
+        # Start the error monitor thread to monitor and handle errors from worker threads
+        error_monitor_thread = ErrorMonitorThread(
+            error_queue,
+            shutdown_event,
+        )
+        error_monitor_thread.start()
+
+        if execution_mode == ExecutionMode.LOCAL:
+            if num_worker_processes == 1:
+                # Single process does not require multiprocessing.
+                _sync_worker_process(
+                    self.source_client,
+                    self.source_path,
+                    self.target_client,
+                    self.target_path,
+                    num_worker_threads,
+                    file_queue,
+                    result_queue,
+                    error_queue,
+                    shutdown_event,
+                )
+            else:
+                # Create individual processes so they can share the multiprocessing.Queue
+                processes = []
+                for _ in range(num_worker_processes):
+                    process = multiprocessing.Process(
+                        target=_sync_worker_process,
+                        args=(
+                            self.source_client,
+                            self.source_path,
+                            self.target_client,
+                            self.target_path,
+                            num_worker_threads,
+                            file_queue,
+                            result_queue,
+                            error_queue,
+                            shutdown_event,
+                        ),
+                    )
+                    processes.append(process)
+                    process.start()
+
+                # Wait for all processes to complete
+                for process in processes:
+                    process.join()
+        elif execution_mode == ExecutionMode.RAY:
+            if not HAVE_RAY:
+                raise RuntimeError(
+                    "Ray execution mode requested but Ray is not installed. "
+                    "To use distributed sync with Ray, install it with: 'pip install ray'. "
+                    "Alternatively, use ExecutionMode.LOCAL for single-machine sync operations."
+                )
+
+            import ray
+
+            # Create a placement group to spread the workers across the cluster.
+            from ray.util.placement_group import placement_group
+            from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+
+            cluster_resources = ray.cluster_resources()
+            available_resources = ray.available_resources()
+            logger.debug(f"Ray cluster resources: {cluster_resources} Available resources: {available_resources}")
+
+            # Check if we have enough resources before creating placement group
+            required_cpus = num_worker_threads * num_worker_processes
+            available_cpus = available_resources.get("CPU", 0)
+
+            # Create placement group based on available resources
+            if available_cpus > 0:
+                # We have CPU resources, create CPU-based placement group
+                if available_cpus < required_cpus:
+                    # Not enough resources for requested configuration, create fallback
+                    logger.warning(
+                        f"Insufficient Ray cluster resources for requested configuration. "
+                        f"Required: {required_cpus} CPUs, Available: {available_cpus} CPUs. "
+                        f"Creating fallback placement group to utilize all available resources."
+                    )
+
+                    # Calculate optimal worker distribution
+                    if available_cpus >= num_worker_processes:
+                        # We can create all processes but with fewer threads per process
+                        cpus_per_worker = max(1, available_cpus // num_worker_processes)
+                        actual_worker_processes = num_worker_processes
+                        actual_worker_threads = min(num_worker_threads, cpus_per_worker)
+                    else:
+                        # Not enough CPUs for all processes, reduce number of processes
+                        actual_worker_processes = max(1, available_cpus)
+                        actual_worker_threads = 1
+                        cpus_per_worker = 1
+
+                    logger.warning(
+                        f"Fallback configuration: {actual_worker_processes} processes, "
+                        f"{actual_worker_threads} threads per process, {cpus_per_worker} CPUs per worker"
+                    )
+
+                    # Create fallback placement group
+                    bundle_specs = [{"CPU": float(cpus_per_worker)}] * int(actual_worker_processes)
+                    msc_sync_placement_group = placement_group(bundle_specs, strategy=PLACEMENT_GROUP_STRATEGY)
+
+                    # Update worker configuration for fallback
+                    num_worker_processes = int(actual_worker_processes)
+                    num_worker_threads = int(actual_worker_threads)
+                else:
+                    # Sufficient resources, use requested configuration
+                    bundle_specs = [{"CPU": float(num_worker_threads)}] * num_worker_processes
+                    msc_sync_placement_group = placement_group(bundle_specs, strategy=PLACEMENT_GROUP_STRATEGY)
+            else:
+                # No CPU resources, create placement group with minimal resource constraints
+                logger.info("Creating placement group with minimal resource constraints")
+                bundle_specs = [{"CPU": 1.0}] * int(num_worker_processes)
+                msc_sync_placement_group = placement_group(bundle_specs, strategy=PLACEMENT_GROUP_STRATEGY)
+
+            # Wait for placement group to be ready with timeout
+            start_time = time.time()
+            while time.time() - start_time < PLACEMENT_GROUP_TIMEOUT_SECONDS:
+                try:
+                    ray.get(msc_sync_placement_group.ready(), timeout=1.0)
+                    break
+                except Exception:
+                    if time.time() - start_time >= PLACEMENT_GROUP_TIMEOUT_SECONDS:
+                        raise RuntimeError(
+                            f"Placement group creation timed out after {PLACEMENT_GROUP_TIMEOUT_SECONDS} seconds. "
+                            f"Required: {required_cpus} CPUs, Available: {available_cpus} CPUs. "
+                            f"Bundle specs: {bundle_specs}"
+                            f"Please check your Ray cluster resources."
+                        )
+                    time.sleep(0.1)  # Small delay before retrying
+
+            _sync_worker_process_ray = ray.remote(_sync_worker_process)
+
+            # Start the sync worker processes.
+            try:
+                ray.get(
+                    [
+                        _sync_worker_process_ray.options(
+                            scheduling_strategy=PlacementGroupSchedulingStrategy(
+                                placement_group=msc_sync_placement_group,
+                                placement_group_bundle_index=worker_index,
+                            )
+                        ).remote(
+                            self.source_client,
+                            self.source_path,
+                            self.target_client,
+                            self.target_path,
+                            num_worker_threads,
+                            file_queue,
+                            result_queue,
+                            error_queue,
+                            shutdown_event,
+                        )
+                        for worker_index in range(int(num_worker_processes))
+                    ]
+                )
+            finally:
+                # Clean up the placement group
+                try:
+                    ray.util.remove_placement_group(msc_sync_placement_group)
+                    start_time = time.time()
+                    while time.time() - start_time < PLACEMENT_GROUP_TIMEOUT_SECONDS:
+                        pg_info = ray.util.placement_group_table(msc_sync_placement_group)
+                        if pg_info is None or pg_info.get("state") == "REMOVED":
+                            break
+                        time.sleep(1.0)
+                except Exception as e:
+                    logger.warning(f"Failed to remove placement group: {e}")
+
+        # Wait for the producer thread to finish.
+        producer_thread.join()
+
+        # Signal the result monitor thread to stop.
+        result_queue.put((OperationType.STOP, None, None))
+        result_monitor_thread.join()
+
+        # Signal the error monitor thread to stop.
+        error_queue.put(None)
+        error_monitor_thread.join()
+
+        # Commit the metadata to the target storage client (if commit_metadata is True).
+        if commit_metadata:
+            self.target_client.commit_metadata()
+
+        # Log the completion of the sync operation.
+        progress.close()
+        logger.debug(f"Completed sync operation {description}")
+
+        # Collect all errors from various sources
+        error_messages = []
+
+        if producer_thread.error:
+            error_messages.append(f"Producer thread error: {producer_thread.error}")
+
+        if result_monitor_thread.error:
+            error_messages.append(f"Result monitor thread error: {result_monitor_thread.error}")
+
+        if error_monitor_thread.error:
+            error_messages.append(f"Error monitor thread error: {error_monitor_thread.error}")
+
+        # Add worker errors with detailed information
+        if error_monitor_thread.errors:
+            error_messages.append(f"\nWorker errors ({len(error_monitor_thread.errors)} total):")
+            for i, error_info in enumerate(error_monitor_thread.errors, 1):
+                error_messages.append(
+                    f"\n  Error {i}:\n"
+                    f"    Worker: {error_info.worker_id}\n"
+                    f"    Operation: {error_info.operation}\n"
+                    f"    File: {error_info.file_key}\n"
+                    f"    Exception: {error_info.exception_type}: {error_info.exception_message}\n"
+                    f"    Traceback:\n{error_info.traceback_str}"
+                )
+
+        if error_messages:
+            raise RuntimeError(f"Errors in sync operation: {''.join(error_messages)}")
