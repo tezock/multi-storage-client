@@ -627,8 +627,9 @@ class PosixFile(IOBase, IO):
         self._mode = mode
         self._atomic = atomic
 
-        # Ensure the parent directory exists
-        os.makedirs(os.path.dirname(self._real_path), exist_ok=True)
+        # Ensure the parent directory exists only for write/append modes
+        if "w" in mode or "a" in mode:
+            os.makedirs(os.path.dirname(self._real_path), exist_ok=True)
 
         if "w" in mode and self._atomic:
             # Create a temporary file in the same directory as the target file

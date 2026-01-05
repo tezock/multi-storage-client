@@ -215,3 +215,31 @@ def test_file_discard(temp_data_store_type: type[tempdatastore.TemporaryDataStor
         fp.discard()
         assert fp._file.closed
         assert not os.path.exists(fp._temp_path)
+
+
+@pytest.mark.parametrize(
+    argnames=["temp_data_store_type"],
+    argvalues=[[tempdatastore.TemporaryPOSIXDirectory]],
+)
+def test_file_read_does_not_create_parent_dirs(temp_data_store_type: type[tempdatastore.TemporaryDataStore]):
+    with temp_data_store_type() as temp_data_store:
+        profile = "data"
+        storage_client = StorageClient(
+            config=StorageClientConfig.from_dict(
+                config_dict={"profiles": {profile: temp_data_store.profile_config_dict()}}, profile=profile
+            )
+        )
+
+        nonexistent_dir = "nonexisting_dir"
+        nonexistent_file_path = os.path.join(nonexistent_dir, "test.txt")
+
+        base_path = temp_data_store.profile_config_dict()["storage_provider"]["options"]["base_path"]
+        full_dir_path = os.path.join(base_path, nonexistent_dir)
+
+        assert not os.path.exists(full_dir_path)
+
+        with pytest.raises(FileNotFoundError):
+            with storage_client.open(nonexistent_file_path, "r") as f:
+                f.read()
+
+        assert not os.path.exists(full_dir_path)
