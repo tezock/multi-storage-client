@@ -479,6 +479,20 @@ class MetadataProvider(ABC):
         """
         pass
 
+    @abstractmethod
+    def should_use_soft_delete(self) -> bool:
+        """
+        Returns ``True`` if the :py:class:`MetadataProvider` should use soft-delete behavior else ``False``.
+
+        When ``True``, delete operations will only mark files as deleted in metadata without removing
+        the physical data from storage. The file will return :py:class:`ResolvedPathState.DELETED` state
+        when queried and will not appear in listings.
+
+        When ``False``, delete operations will remove both the metadata and the physical file from storage
+        (hard delete).
+        """
+        pass
+
 
 @dataclass
 class StorageProviderConfig:

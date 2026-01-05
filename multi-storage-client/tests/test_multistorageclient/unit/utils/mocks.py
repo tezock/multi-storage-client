@@ -126,6 +126,9 @@ class TestMetadataProvider(MetadataProvider):
     def allow_overwrites(self) -> bool:
         return False
 
+    def should_use_soft_delete(self) -> bool:
+        return False
+
 
 class TestProviderBundle(ProviderBundle):
     @property

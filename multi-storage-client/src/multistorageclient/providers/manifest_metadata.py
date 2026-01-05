@@ -478,6 +478,9 @@ class ManifestMetadataProvider(MetadataProvider):
     def allow_overwrites(self) -> bool:
         return self._allow_overwrites
 
+    def should_use_soft_delete(self) -> bool:
+        return False
+
     def commit_updates(self) -> None:
         if not self._pending_adds and not self._pending_removes:
             return

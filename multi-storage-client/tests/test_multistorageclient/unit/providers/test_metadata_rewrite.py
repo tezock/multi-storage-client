@@ -27,7 +27,7 @@ from multistorageclient.types import MetadataProvider, ObjectMetadata, ResolvedP
 
 
 class UuidMetadataProvider(MetadataProvider):
-    def __init__(self):
+    def __init__(self, soft_delete: bool = True):
         # Remap the paths to random uuid filenames
         self._path_to_uuid: dict[str, str] = {}
         self._uuid_to_info: dict[str, ObjectMetadata] = {}
@@ -35,6 +35,7 @@ class UuidMetadataProvider(MetadataProvider):
         self._pending_deletes: set[str] = set()
         self._deleted_files: set[str] = set()  # Track soft-deleted files
         self._allow_overwrites: bool = False  # Control overwrite behavior
+        self._soft_delete: bool = soft_delete  # Control soft-delete behavior
 
     def list_objects(
         self,
@@ -126,6 +127,9 @@ class UuidMetadataProvider(MetadataProvider):
 
     def allow_overwrites(self) -> bool:
         return self._allow_overwrites
+
+    def should_use_soft_delete(self) -> bool:
+        return self._soft_delete
 
 
 @pytest.mark.parametrize(
@@ -341,3 +345,171 @@ def test_uuid_metadata_provider(temp_data_store_type: type[tempdatastore.Tempora
         finally:
             # Restore original provider
             storage_client._metadata_provider = original_provider
+
+
+@pytest.mark.parametrize(
+    argnames=["temp_data_store_type"],
+    argvalues=[[tempdatastore.TemporaryPOSIXDirectory], [tempdatastore.TemporaryAWSS3Bucket]],
+)
+def test_soft_delete_enabled(temp_data_store_type: type[tempdatastore.TemporaryDataStore]):
+    """Test that soft-delete only removes metadata, keeping the physical file, and excludes from listings."""
+    with temp_data_store_type() as temp_data_store:
+        data_profile_config_dict = temp_data_store.profile_config_dict()
+
+        storage_client_config_dict = {
+            "profiles": {
+                "test": data_profile_config_dict,
+            }
+        }
+
+        # Create metadata provider with soft-delete enabled (default)
+        metadata_provider = UuidMetadataProvider(soft_delete=True)
+        assert metadata_provider.should_use_soft_delete()
+
+        storage_client = StorageClient(
+            config=StorageClientConfig.from_dict(config_dict=storage_client_config_dict, profile="test")
+        )
+        storage_client._metadata_provider = metadata_provider
+
+        # Get the underlying storage provider for direct access
+        storage_provider = storage_client._delegate._storage_provider
+        assert storage_provider is not None
+
+        # Write multiple test files to verify listings behavior
+        test_files = ["file1.txt", "file2.txt", "soft_delete_test.txt"]
+        for file_path in test_files:
+            storage_client.write(file_path, f"content of {file_path}".encode())
+        storage_client.commit_metadata()
+
+        # Verify all files exist in listing
+        listed_files = [obj.key for obj in storage_client.list("")]
+        for file_path in test_files:
+            assert file_path in listed_files
+
+        # Focus on the soft_delete_test.txt file for detailed verification
+        test_file_path = "soft_delete_test.txt"
+        test_content = f"content of {test_file_path}".encode()
+
+        # Verify file exists
+        assert storage_client.is_file(test_file_path)
+        assert storage_client.read(test_file_path) == test_content
+
+        # Get the physical path before deletion
+        resolved = metadata_provider.realpath(test_file_path)
+        physical_path = resolved.physical_path
+        assert resolved.state == ResolvedPathState.EXISTS
+
+        # Verify physical file exists in storage
+        physical_metadata = storage_provider.get_object_metadata(physical_path)
+        assert physical_metadata is not None
+
+        # Delete the file with soft-delete enabled
+        storage_client.delete(test_file_path)
+        storage_client.commit_metadata()
+
+        # Verify file is marked as deleted in metadata
+        assert not storage_client.is_file(test_file_path)
+        with pytest.raises(FileNotFoundError):
+            storage_client.read(test_file_path)
+
+        # Verify the file returns DELETED state
+        resolved_after_delete = metadata_provider.realpath(test_file_path)
+        assert resolved_after_delete.state == ResolvedPathState.DELETED
+        assert resolved_after_delete.physical_path == physical_path
+
+        # CRITICAL: Verify physical file still exists in storage (soft-delete)
+        physical_metadata_after = storage_provider.get_object_metadata(physical_path)
+        assert physical_metadata_after is not None, "Physical file should still exist after soft-delete"
+
+        # Verify we can still read the physical file directly from storage
+        physical_content = storage_provider.get_object(physical_path)
+        assert physical_content == test_content, "Physical file content should be intact after soft-delete"
+
+        # Verify soft-deleted file doesn't appear in listings
+        listed_files_after = [obj.key for obj in storage_client.list("")]
+        assert "file1.txt" in listed_files_after
+        assert "file2.txt" in listed_files_after
+        assert test_file_path not in listed_files_after, "Soft-deleted file should not appear in listings"
+
+        # Verify glob also excludes soft-deleted files
+        glob_results = storage_client.glob("*.txt")
+        assert "file1.txt" in glob_results
+        assert "file2.txt" in glob_results
+        assert test_file_path not in glob_results, "Soft-deleted file should not appear in glob results"
+
+
+@pytest.mark.parametrize(
+    argnames=["temp_data_store_type"],
+    argvalues=[[tempdatastore.TemporaryPOSIXDirectory], [tempdatastore.TemporaryAWSS3Bucket]],
+)
+def test_hard_delete_enabled(temp_data_store_type: type[tempdatastore.TemporaryDataStore]):
+    """Test that hard-delete removes both metadata and physical file."""
+    with temp_data_store_type() as temp_data_store:
+        data_profile_config_dict = temp_data_store.profile_config_dict()
+
+        storage_client_config_dict = {
+            "profiles": {
+                "test": data_profile_config_dict,
+            }
+        }
+
+        # Create metadata provider with soft-delete disabled (hard delete)
+        metadata_provider = UuidMetadataProvider(soft_delete=False)
+        assert not metadata_provider.should_use_soft_delete()
+
+        storage_client = StorageClient(
+            config=StorageClientConfig.from_dict(config_dict=storage_client_config_dict, profile="test")
+        )
+        storage_client._metadata_provider = metadata_provider
+
+        # Get the underlying storage provider for direct access
+        storage_provider = storage_client._delegate._storage_provider
+        assert storage_provider is not None
+
+        # Write a test file
+        test_file_path = "hard_delete_test.txt"
+        test_content = b"test content for hard delete"
+        storage_client.write(test_file_path, test_content)
+        storage_client.commit_metadata()
+
+        # Verify file exists
+        assert storage_client.is_file(test_file_path)
+        assert storage_client.read(test_file_path) == test_content
+
+        # Get the physical path before deletion
+        resolved = metadata_provider.realpath(test_file_path)
+        physical_path = resolved.physical_path
+        assert resolved.state == ResolvedPathState.EXISTS
+
+        # Verify physical file exists in storage
+        physical_metadata = storage_provider.get_object_metadata(physical_path)
+        assert physical_metadata is not None
+
+        # Delete the file with hard-delete enabled
+        storage_client.delete(test_file_path)
+        storage_client.commit_metadata()
+
+        # Verify file is marked as deleted in metadata
+        assert not storage_client.is_file(test_file_path)
+        with pytest.raises(FileNotFoundError):
+            storage_client.read(test_file_path)
+
+        # Verify the file returns DELETED state
+        resolved_after_delete = metadata_provider.realpath(test_file_path)
+        assert resolved_after_delete.state == ResolvedPathState.DELETED
+
+        # CRITICAL: Verify physical file is also deleted from storage (hard-delete)
+        # The physical file should be completely removed from storage
+        try:
+            physical_metadata_after = storage_provider.get_object_metadata(physical_path, strict=False)
+            # If we get here without an exception, the file still exists (test should fail)
+            assert False, (
+                f"Physical file should be deleted after hard-delete, but metadata returned: {physical_metadata_after}"
+            )
+        except FileNotFoundError:
+            # This is expected - the physical file should be deleted
+            pass
+
+        # Verify we cannot read the physical file from storage
+        with pytest.raises(FileNotFoundError):
+            storage_provider.get_object(physical_path)
