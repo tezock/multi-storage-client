@@ -141,7 +141,7 @@ func fissionTestUp(t *testing.T) {
 	backend.context.(*ramContextStruct).curTotalObjects += 5
 	backend.context.(*ramContextStruct).curTotalObjectSpace += 7 + testFissionFileBLen + 12 + 17 + 17
 
-	// We will comment the following out for now... but left here for documnetation and possibly later use
+	// We will comment the following out for now... but left here for documentation and possibly later use
 	// globals.logger.Printf("[INFO] [backend.dirName: \"%s\"] ramContext.rootDir populated with:", backend.dirName)
 	// globals.logger.Printf("[INFO]        ├── dir1")
 	// globals.logger.Printf("[INFO]        │   ├── dir3")

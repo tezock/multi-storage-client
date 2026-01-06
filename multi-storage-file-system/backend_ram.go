@@ -89,6 +89,7 @@ func (ramContext *ramContextStruct) deleteFile(deleteFileInput *deleteFileInputS
 	ok = ramDir[ramDirIndex].fileMap.DeleteByKey(fileName)
 	if !ok {
 		// We know fileName should have been in leaf ramDir, so if it failes, this is fatal
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] ramDir[ramDirIndex].fileMap.DeleteByKey(fileName) returned !ok")
 	}
 
@@ -108,6 +109,7 @@ func (ramContext *ramContextStruct) deleteFile(deleteFileInput *deleteFileInputS
 		ok = ramDir[ramDirIndex-1].dirMap.DeleteByKey(ramDir[ramDirIndex].dirName)
 		if !ok {
 			// We know dirName should have been in our parent directory, so if it fails, this is fatal
+			dumpStack()
 			globals.logger.Fatalf("[FATAL] ramDir[ramDirIndex-1].dirMap.DeleteByKey(ramDir[ramDirIndex].dirName) returned !ok")
 		}
 
@@ -210,6 +212,7 @@ func (ramContext *ramContextStruct) listDirectory(listDirectoryInput *listDirect
 			if !ok {
 				// Since we previously discovered ramDirLeafDirMapLen, and have bounds checked it above,
 				// we know itemIndex is a valid index into dirMap... so this is a fatal condition
+				dumpStack()
 				globals.logger.Fatalf("[FATAL] ramDirLeaf.dirMap.GetByIndex(int(itemIndex)) returned !ok")
 			}
 			listDirectoryOutput.subdirectory = append(listDirectoryOutput.subdirectory, subdirectoryName)
@@ -219,6 +222,7 @@ func (ramContext *ramContextStruct) listDirectory(listDirectoryInput *listDirect
 				// Since we previously discovered ramDirLeafDirMapLen and ramDirLeafFileMapLen
 				// to compute itemLimit and know that itemIndex >= ramDirLeafDirMapLen,
 				// we know itemIndex-ramDirLEafDirMapLen is a valid index indo fileMap... so this is a fatal condition
+				dumpStack()
 				globals.logger.Fatalf("[FATAL] ramDirLeaf.fileMap.GetByIndex(int(itemIndex - ramDirLeafDirMapLen)) returned !ok")
 			}
 			listDirectoryOutput.file = append(listDirectoryOutput.file, listDirectoryOutputFileStruct{
@@ -438,6 +442,7 @@ func (ramDirEntryDirMap *ramDirEntryDirMapStruct) DeleteByKey(keyAsString string
 	ok, err := ramDirEntryDirMap.llrb.DeleteByKey(keyAsString)
 	if err != nil {
 		// A non-nil err indicates a fatally corrupt llrb
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] ramDirEntryDirMap.llrb.DeleteByKey(keyAsString) failed: %v", err)
 	}
 	return
@@ -448,6 +453,7 @@ func (ramDirEntryDirMap *ramDirEntryDirMapStruct) GetByIndex(index int) (keyAsSt
 	keyAsKey, valueAsValue, ok, err := ramDirEntryDirMap.llrb.GetByIndex(index)
 	if err != nil {
 		// A non-nil err indicates a fatally corrupt llrb
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] ramDirEntryDirMap.llrb.GetByIndex(index) failed: %v", err)
 	}
 	if !ok {
@@ -455,10 +461,12 @@ func (ramDirEntryDirMap *ramDirEntryDirMapStruct) GetByIndex(index int) (keyAsSt
 	}
 	keyAsString, ok = keyAsKey.(string)
 	if !ok {
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] keyAsKey.(string) returned !ok")
 	}
 	valueAsRamDir, ok = valueAsValue.(*ramDirStruct)
 	if !ok {
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] valueAsValue.(*ramDirStruct) returned !ok")
 	}
 	return
@@ -469,6 +477,7 @@ func (ramDirEntryDirMap *ramDirEntryDirMapStruct) GetByKey(keyAsString string) (
 	valueAsValue, ok, err := ramDirEntryDirMap.llrb.GetByKey(keyAsString)
 	if err != nil {
 		// A non-nil err indicates a fatally corrupt llrb
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] ramDirEntryDirMap.llrb.GetByKey(keyAsString) failed: %v", err)
 	}
 	if !ok {
@@ -476,6 +485,7 @@ func (ramDirEntryDirMap *ramDirEntryDirMapStruct) GetByKey(keyAsString string) (
 	}
 	valueAsRamDir, ok = valueAsValue.(*ramDirStruct)
 	if !ok {
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] valueAsValue.(*ramDirStruct) returned !ok")
 	}
 	return
@@ -486,6 +496,7 @@ func (ramDirEntryDirMap *ramDirEntryDirMapStruct) Len() (numberOfItems int) {
 	numberOfItems, err := ramDirEntryDirMap.llrb.Len()
 	if err != nil {
 		// A non-nil err indicates a fatally corrupt llrb
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] ramDirEntryDirMap.llrb.Len() failed: %v", err)
 	}
 	return
@@ -496,6 +507,7 @@ func (ramDirEntryDirMap *ramDirEntryDirMapStruct) Put(keyAsString string, valueA
 	ok, err := ramDirEntryDirMap.llrb.Put(keyAsString, valueAsRamDir)
 	if err != nil {
 		// A non-nil err indicates a fatally corrupt llrb
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] ramDirEntryDirMap.llrb.Put(keyAsString, valueAsRamDir) failed: %v", err)
 	}
 	return
@@ -530,6 +542,7 @@ func (ramDirEntryFileMap *ramDirEntryFileMapStruct) DeleteByKey(keyAsString stri
 	ok, err := ramDirEntryFileMap.llrb.DeleteByKey(keyAsString)
 	if err != nil {
 		// A non-nil err indicates a fatally corrupt llrb
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] ramDirEntryFileMap.llrb.DeleteByKey(keyAsString) failed: %v", err)
 	}
 	return
@@ -540,6 +553,7 @@ func (ramDirEntryFileMap *ramDirEntryFileMapStruct) GetByIndex(index int) (keyAs
 	keyAsKey, valueAsValue, ok, err := ramDirEntryFileMap.llrb.GetByIndex(index)
 	if err != nil {
 		// A non-nil err indicates a fatally corrupt llrb
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] ramDirEntryFileMap.llrb.GetByIndex(index) failed: %v", err)
 	}
 	if !ok {
@@ -547,10 +561,12 @@ func (ramDirEntryFileMap *ramDirEntryFileMapStruct) GetByIndex(index int) (keyAs
 	}
 	keyAsString, ok = keyAsKey.(string)
 	if !ok {
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] keyAsKey.(string) returned !ok")
 	}
 	valueAsByteSlice, ok = valueAsValue.([]byte)
 	if !ok {
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] valueAsValue.([]byte) returned !ok")
 	}
 	return
@@ -561,6 +577,7 @@ func (ramDirEntryFileMap *ramDirEntryFileMapStruct) GetByKey(keyAsString string)
 	valueAsValue, ok, err := ramDirEntryFileMap.llrb.GetByKey(keyAsString)
 	if err != nil {
 		// A non-nil err indicates a fatally corrupt llrb
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] ramDirEntryFileMap.llrb.GetByKey(keyAsString) failed: %v", err)
 	}
 	if !ok {
@@ -568,6 +585,7 @@ func (ramDirEntryFileMap *ramDirEntryFileMapStruct) GetByKey(keyAsString string)
 	}
 	valueAsByteSlice, ok = valueAsValue.([]byte)
 	if !ok {
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] valueAsValue.([]byte) returned !ok")
 	}
 	return
@@ -578,6 +596,7 @@ func (ramDirEntryFileMap *ramDirEntryFileMapStruct) Len() (numberOfItems int) {
 	numberOfItems, err := ramDirEntryFileMap.llrb.Len()
 	if err != nil {
 		// A non-nil err indicates a fatally corrupt llrb
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] ramDirEntryFileMap.llrb.Len() failed: %v", err)
 	}
 	return
@@ -588,6 +607,7 @@ func (ramDirEntryFileMap *ramDirEntryFileMapStruct) Put(keyAsString string, valu
 	ok, err := ramDirEntryFileMap.llrb.Put(keyAsString, valueAsByteSlice)
 	if err != nil {
 		// A non-nil err indicates a fatally corrupt llrb
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] ramDirEntryFileMap.llrb.Put(keyAsString, valueAsByteSlice) failed: %v", err)
 	}
 	return

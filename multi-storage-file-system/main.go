@@ -75,6 +75,7 @@ func main() {
 
 	err = checkConfigFile()
 	if err != nil {
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] parsing config-file (\"%s\") failed: %v", globals.configFilePath, err)
 	}
 
@@ -86,6 +87,7 @@ func main() {
 
 	err = performFissionMount()
 	if err != nil {
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] unable to perform FUSE mount [Err: %v]", err)
 	}
 
@@ -111,6 +113,7 @@ func main() {
 
 				err = performFissionUnmount()
 				if err != nil {
+					dumpStack()
 					globals.logger.Fatalf("[FATAL] unexpected error during FUSE unmount: %v", err)
 				}
 
@@ -166,6 +169,7 @@ func main() {
 		case err = <-globals.errChan:
 			// We received an Unexpected exit of /dev/fuse read loop... to terminate abnormally
 
+			dumpStack()
 			globals.logger.Fatalf("[FATAL] received unexpected FUSE error: %v", err)
 		}
 	}

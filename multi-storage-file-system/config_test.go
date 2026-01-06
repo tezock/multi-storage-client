@@ -587,20 +587,23 @@ backends: [
 
 	processToMountList()
 
-	if globals.inode.virtChildDirMap.Len() != 3 {
-		t.Fatalf("globals.inode.virtChildDirMap.Len() should have been 3 (\".\", \"..\", \"ram1\")")
+	if globals.inode.virtChildInodeMap.Len() != 3 {
+		t.Fatalf("globals.inode.virtChildInodeMap.Len() should have been 3 (\".\", \"..\", \"ram1\")")
 	}
-	_, ok = globals.inode.virtChildDirMap.GetByKey(".")
+	_, ok = globals.inode.virtChildInodeMap.GetByKey(".")
 	if !ok {
-		t.Fatalf("globals.inode.virtChildDirMap.GetByKey(\".\") returned !ok")
+		t.Fatalf("globals.inode.virtChildInodeMap.GetByKey(\".\") returned !ok")
 	}
-	_, ok = globals.inode.virtChildDirMap.GetByKey("..")
+	_, ok = globals.inode.virtChildInodeMap.GetByKey("..")
 	if !ok {
-		t.Fatalf("globals.inode.virtChildDirMap.GetByKey(\"..\") returned !ok")
+		t.Fatalf("globals.inode.virtChildInodeMap.GetByKey(\"..\") returned !ok")
 	}
-	_, ok = globals.inode.virtChildDirMap.GetByKey("ram1")
+	_, ok = globals.inode.virtChildInodeMap.GetByKey("ram1")
 	if !ok {
-		t.Fatalf("globals.inode.virtChildDirMap.GetByKey(\"ram1\") returned !ok")
+		t.Fatalf("globals.inode.virtChildInodeMap.GetByKey(\"ram1\") returned !ok")
+	}
+	if globals.inode.physChildInodeMap.Len() != 0 {
+		t.Fatalf("globals.inode.physChildInodeMap.Len() should have been 0")
 	}
 
 	err = os.WriteFile(globals.configFilePath, []byte(`
@@ -631,24 +634,27 @@ backends: [
 
 	processToMountList()
 
-	if globals.inode.virtChildDirMap.Len() != 4 {
-		t.Fatalf("globals.inode.virtChildDirMap.Len() should have been 3 (\".\", \"..\", \"ram1\", \"ram2\")")
+	if globals.inode.virtChildInodeMap.Len() != 4 {
+		t.Fatalf("globals.inode.virtChildInodeMap.Len() should have been 4 (\".\", \"..\", \"ram1\", \"ram2\")")
 	}
-	_, ok = globals.inode.virtChildDirMap.GetByKey(".")
+	_, ok = globals.inode.virtChildInodeMap.GetByKey(".")
 	if !ok {
-		t.Fatalf("globals.inode.virtChildDirMap.GetByKey(\".\") returned !ok")
+		t.Fatalf("globals.inode.virtChildInodeMap.GetByKey(\".\") returned !ok")
 	}
-	_, ok = globals.inode.virtChildDirMap.GetByKey("..")
+	_, ok = globals.inode.virtChildInodeMap.GetByKey("..")
 	if !ok {
-		t.Fatalf("globals.inode.virtChildDirMap.GetByKey(\"..\") returned !ok")
+		t.Fatalf("globals.inode.virtChildInodeMap.GetByKey(\"..\") returned !ok")
 	}
-	_, ok = globals.inode.virtChildDirMap.GetByKey("ram1")
+	_, ok = globals.inode.virtChildInodeMap.GetByKey("ram1")
 	if !ok {
-		t.Fatalf("globals.inode.virtChildDirMap.GetByKey(\"ram1\") returned !ok")
+		t.Fatalf("globals.inode.virtChildInodeMap.GetByKey(\"ram1\") returned !ok")
 	}
-	_, ok = globals.inode.virtChildDirMap.GetByKey("ram2")
+	_, ok = globals.inode.virtChildInodeMap.GetByKey("ram2")
 	if !ok {
-		t.Fatalf("globals.inode.virtChildDirMap.GetByKey(\"ram2\") returned !ok")
+		t.Fatalf("globals.inode.virtChildInodeMap.GetByKey(\"ram2\") returned !ok")
+	}
+	if globals.inode.physChildInodeMap.Len() != 0 {
+		t.Fatalf("globals.inode.physChildInodeMap.Len() should have been 0")
 	}
 
 	err = os.WriteFile(globals.configFilePath, []byte(`
@@ -674,20 +680,23 @@ backends: [
 
 	processToMountList()
 
-	if globals.inode.virtChildDirMap.Len() != 3 {
-		t.Fatalf("globals.inode.virtChildDirMap.Len() should have been 3 (\".\", \"..\", \"ram1\", \"ram2\")")
+	if globals.inode.virtChildInodeMap.Len() != 3 {
+		t.Fatalf("globals.inode.virtChildInodeMap.Len() should have been 3 (\".\", \"..\", \"ram2\")")
 	}
-	_, ok = globals.inode.virtChildDirMap.GetByKey(".")
+	_, ok = globals.inode.virtChildInodeMap.GetByKey(".")
 	if !ok {
-		t.Fatalf("globals.inode.virtChildDirMap.GetByKey(\".\") returned !ok")
+		t.Fatalf("globals.inode.virtChildInodeMap.GetByKey(\".\") returned !ok")
 	}
-	_, ok = globals.inode.virtChildDirMap.GetByKey("..")
+	_, ok = globals.inode.virtChildInodeMap.GetByKey("..")
 	if !ok {
-		t.Fatalf("globals.inode.virtChildDirMap.GetByKey(\"..\") returned !ok")
+		t.Fatalf("globals.inode.virtChildInodeMap.GetByKey(\"..\") returned !ok")
 	}
-	_, ok = globals.inode.virtChildDirMap.GetByKey("ram2")
+	_, ok = globals.inode.virtChildInodeMap.GetByKey("ram2")
 	if !ok {
-		t.Fatalf("globals.inode.virtChildDirMap.GetByKey(\"ram2\") returned !ok")
+		t.Fatalf("globals.inode.virtChildInodeMap.GetByKey(\"ram2\") returned !ok")
+	}
+	if globals.inode.physChildInodeMap.Len() != 0 {
+		t.Fatalf("globals.inode.physChildInodeMap.Len() should have been 0")
 	}
 }
 

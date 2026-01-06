@@ -31,6 +31,14 @@ type backendConfigAIStoreStruct struct {
 	timeout                  time.Duration //  JSON/YAML "timeout"                      default:30000
 }
 
+// `backendConfigRAMStruct` describes a backend's RAM-specific settings.
+type backendConfigRAMStruct struct {
+	// From <config-file>
+	maxTotalObjects      uint64 //             JSON/YAML "max_total_objects"            default:10000
+	maxTotalObjectSpace  uint64 //             JSON/YAML "max_total_object_space"       default:1073741824
+	maxDirectoryPageSize uint64 //             JSON/YAML "max_directory_page_size"      default:100
+}
+
 // `backendConfigS3Struct` describes a backend's S3-specific settings.
 type backendConfigS3Struct struct {
 	// From <config-file>
@@ -48,17 +56,9 @@ type backendConfigS3Struct struct {
 	unsignedPayload           bool          // JSON/YAML "unsigned_payload"             default:false
 	retryBaseDelay            time.Duration // JSON/YAML "retry_base_delay"             default:10
 	retryNextDelayMultiplier  float64       // JSON/YAML "retry_next_delay_multiplier"  default:2.0
-	retryMaxDelay             time.Duration // JSON/YAML "retry_max_delay"              default:10000
+	retryMaxDelay             time.Duration // JSON/YAML "retry_max_delay"              default:2000
 	// Runtime state
 	retryDelay []time.Duration //              Delay slice indexed by RetryDelay()'s attempt arg - 1
-}
-
-// `backendConfigRAMStruct` describes a backend's RAM-specific settings.
-type backendConfigRAMStruct struct {
-	// From <config-file>
-	maxTotalObjects      uint64 //             JSON/YAML "max_total_objects"            default:10000
-	maxTotalObjectSpace  uint64 //             JSON/YAML "max_total_object_space"       default:1073741824
-	maxDirectoryPageSize uint64 //             JSON/YAML "max_directory_page_size"      default:100
 }
 
 // `backendStruct` contains the generic backend's settings and runtime
@@ -82,13 +82,12 @@ type backendStruct struct {
 	backendType                 string      // JSON/YAML "backend_type"                   required(one of "AIStore", "RAM", "S3")
 	backendTypeSpecifics        interface{} //                                            required(one of *backendConfig{AIStore|S3|RAM}Struct)
 	// Runtime state
-	backendPath    string                  //  URL incorporating each of the above path-related values
-	context        backendContextIf        //
-	inode          *inodeStruct            //  Link to this backendStruct's inodeStruct with .inodeType == BackendRootDir
-	inodeMap       map[string]*inodeStruct //  Key: inodeStruct.objectPath
-	fissionMetrics *fissionMetricsStruct   //
-	backendMetrics *backendMetricsStruct   //
-	mounted        bool                    //  If false, backendStruct.dirName not in fuseRootDirInodeMAP
+	backendPath    string                //  URL incorporating each of the above path-related values
+	context        backendContextIf      //
+	inode          *inodeStruct          //  Link to this backendStruct's inodeStruct with .inodeType == BackendRootDir
+	fissionMetrics *fissionMetricsStruct //
+	backendMetrics *backendMetricsStruct //
+	mounted        bool                  //  If false, backendStruct.dirName not in fuseRootDirInodeMAP
 }
 
 // `configStruct` describes the global configuration settings as well as the array of backendStruct's configured.
@@ -101,14 +100,17 @@ type configStruct struct {
 	gid                         uint64                     // JSON/YAML "gid"                             default:<current egid>
 	dirPerm                     uint64                     // JSON/YAML "dir_perm"                        default:0o555
 	allowOther                  bool                       // JSON/YAML "allow_other"                     default:true
-	maxWrite                    uint64                     // JSON/YAML "max_write"                       default:131072(128Ki)
-	entryAttrTTL                time.Duration              // JSON/YAML "entry_attr_ttl"                  default:1000(in milliseconds)
-	evictableInodeTTL           time.Duration              // JSON/YAML "evictable_inode_ttl"             default:2000(in milliseconds)
-	cacheLineSize               uint64                     // JSON/YAML "cache_line_size"                 default:1048576(1Mi)
+	maxWrite                    uint64                     // JSON/YAML "max_write"                       default:131072 (128Ki)
+	entryAttrTTL                time.Duration              // JSON/YAML "entry_attr_ttl"                  default:10000 (in milliseconds)
+	evictableInodeTTL           time.Duration              // JSON/YAML "evictable_inode_ttl"             default:1000000 (in milliseconds)
+	virtualDirTTL               time.Duration              // JSON/YAML "virtual_dir_ttl"                 default:1000000 (in milliseconds)
+	virtualFileTTL              time.Duration              // JSON/YAML "virtual_file_ttl"                default:1000000 (in milliseconds)
+	cacheLineSize               uint64                     // JSON/YAML "cache_line_size"                 default:1048576 (1Mi)
 	cacheLines                  uint64                     // JSON/YAML "cache_lines"                     default:4096
-	dirtyCacheLinesFlushTrigger uint64                     // JSON/YAML "dirty_cache_lines_flush_trigger" default:80(as a percentage)
-	dirtyCacheLinesMax          uint64                     // JSON/YAML "dirty_cache_lines_max"           default:90(as a percentage)
-	autoSIGHUPInterval          time.Duration              // JSON/YAML "auto_sighup_interval"            default:0(none)
+	cacheLinesToPrefetch        uint64                     // JSON/YAML "cache_lines_to_prefetch"         default:4
+	dirtyCacheLinesFlushTrigger uint64                     // JSON/YAML "dirty_cache_lines_flush_trigger" default:80 (as a percentage)
+	dirtyCacheLinesMax          uint64                     // JSON/YAML "dirty_cache_lines_max"           default:90 (as a percentage)
+	autoSIGHUPInterval          time.Duration              // JSON/YAML "auto_sighup_interval"            default:0 (none)
 	observability               *observabilityConfigStruct // JSON/YAML "observability"                   default:nil (disabled)
 	endpoint                    string                     // JSON/YAML "endpoint"                        default:""
 	backends                    map[string]*backendStruct  // JSON/YAML "backends"                        Key == backendStruct.mountPointSubdirectoryName
@@ -198,8 +200,10 @@ type fhStruct struct {
 }
 
 const (
-	VirtChildDirMap  = "inodeStruct.virtChildDirMap"
-	VirtChildFileMap = "inodeStruct.virtChildFileMap"
+	PhysChildInodeMap = "inodeStruct.physChildInodeMap"
+	VirtChildInodeMap = "inodeStruct.virtChildInodeMap"
+
+	InodeEvictionLRU = "globalsStruct.inodeEvictionLRU"
 )
 
 const (
@@ -234,11 +238,11 @@ type inodeStruct struct {
 	eTag              string                      // If inodeType == FileObject, contains the eTag returned by the most recent call to readFileWrapper() for the object; otherwise == ""
 	mode              uint32                      // If inodeType == FileObject, == (syscall.S_IFREG | file_perm); otherwise, == (syscall.S_IFDIR | dir_perm)
 	mTime             time.Time                   // Time when this inodeStruct was last modified - note this is reported for aTime, bTime, and cTime as well
-	lTime             time.Time                   // Time when this inodeStruct was last looked up - used, along with .listElement, to cache evict from globals.inodeMap
-	listElement       *list.Element               // If .isEvictable() == true, link into globals.inodeLRU ordered by .lTime; otherwise == nil
+	xTime             time.Time                   // If != time.Time{}, marks the time when, if not recently accessed, the inode may be evicted
+	listElement       *list.Element               // If != nil, maintains position on globals.inodeEvictionLRU identified by .inodeNumber ordered by .xTime
 	fhMap             map[uint64]*fhStruct        // Key == fhStruct.nonce; Value == *fhStruct
-	virtChildDirMap   *stringToUint64MapStruct    // [inodeType != FileObject] maps ".", "..", backendStruct.dirName (== backendStruct.inode.basename), or (currently empty) PsuedoDir's inodeStruct.basename to its inodeStruct.inodeNumebr
-	virtChildFileMap  *stringToUint64MapStruct    // [inodeType != FileObject] maps (including those not yet instantiated in backend) FileObject's inodeStruct.basename to its inodeStruct; will be empty if .inodeType == FUSERootDir
+	physChildInodeMap *stringToUint64MapStruct    // [inodeType != FileObject] maps dirEntries of type FileObject or PseudoDir for which there are existing backend objects
+	virtChildInodeMap *stringToUint64MapStruct    // [inodeType != FileObject] maps dirEntries "." and ".." as well as others of type BackendRootDir plus those of type FileObject or PseudoDir for which there doesn't yet exist backing objects
 	cache             map[uint64]*cacheLineStruct // [inodeType == FileObject] Key == file offset / globals.config.cacheLineSize
 }
 
@@ -259,7 +263,7 @@ type globalsStruct struct {
 	lastNonce              uint64                    // Used to safely allocate non-repeating values (initialized to FUSERootDirInodeNumber to ensure skipping it)
 	inode                  *inodeStruct              // Link to the lone inodeStruct with .inodeNumber == FUSERootDirInodeNumber && .inodeType == FUSERootDir
 	inodeMap               map[uint64]*inodeStruct   // Key: inodeStruct.inodeNumber
-	inodeLRU               *list.List                // Contains inodeStruct.listElement's that are evictable ordered by inodeStruct.lTime
+	inodeEvictionLRU       *timeToUint64QueueStruct  // Contains inodeStruct.listElement's of inode.inodeNumber's ordered by inode.xTime
 	inodeEvictorContext    context.Context           //
 	inodeEvictorCancelFunc context.CancelFunc        //
 	inodeEvictorWaitGroup  sync.WaitGroup            //
@@ -293,6 +297,7 @@ func initGlobals(osArgs []string) {
 	for {
 		if len(osArgs) == 2 {
 			if !checkForFile(osArgs[1]) {
+				dumpStack()
 				globals.logger.Fatalf("[FATAL] file not readable at \"%s\"", osArgs[1])
 			}
 			globals.configFilePath = osArgs[1]
@@ -301,6 +306,7 @@ func initGlobals(osArgs []string) {
 
 		if mscConfigEnv != "" {
 			if !checkForFile(mscConfigEnv) {
+				dumpStack()
 				globals.logger.Fatalf("[FATAL] file not readable at non-empty ${MSC_CONFIG} [\"%s\"]", mscConfigEnv)
 			}
 			globals.configFilePath = mscConfigEnv
@@ -400,6 +406,7 @@ func initGlobals(osArgs []string) {
 			break
 		}
 
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] config-file not found along search path")
 	}
 

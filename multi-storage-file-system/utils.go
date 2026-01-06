@@ -1,6 +1,8 @@
 package main
 
 import (
+	"runtime/debug"
+	"strings"
 	"time"
 )
 
@@ -24,4 +26,23 @@ func timeTimeToAttrTime(timeTime time.Time) (timeTimeSec uint64, timeTimeNSec ui
 	timeTimeNSec = uint32(unixNano - (timeTimeSec * 1e9))
 
 	return
+}
+
+// `dumpStack` outputs the stack to globals.logger
+func dumpStack() {
+	var (
+		stackByteSlice []byte
+		stackString    string
+		stackStrings   []string
+	)
+
+	stackByteSlice = debug.Stack()
+
+	stackStrings = strings.Split(string(stackByteSlice), "\n")
+
+	for _, stackString = range stackStrings {
+		if stackString != "" {
+			globals.logger.Printf("[DEBUG] %s", stackString)
+		}
+	}
 }

@@ -663,6 +663,26 @@ func checkConfigFile() (err error) {
 		return
 	}
 
+	config.virtualDirTTL, ok = parseMilliseconds(configFileMap, "virtual_dir_ttl", 1000000*time.Millisecond)
+	if !ok {
+		err = errors.New("bad virtual_dir_ttl value")
+		return
+	}
+	if uint64(config.virtualDirTTL) < uint64(config.evictableInodeTTL) {
+		err = fmt.Errorf("virtual_dir_ttl(%v) should be at least evictable_inode_ttl(%v)", config.virtualDirTTL, config.evictableInodeTTL)
+		return
+	}
+
+	config.virtualFileTTL, ok = parseMilliseconds(configFileMap, "virtual_file_ttl", 1000000*time.Millisecond)
+	if !ok {
+		err = errors.New("bad virtual_file_ttl value")
+		return
+	}
+	if uint64(config.virtualFileTTL) < uint64(config.evictableInodeTTL) {
+		err = fmt.Errorf("virtual_file_ttl(%v) should be at least evictable_inode_ttl(%v)", config.virtualFileTTL, config.evictableInodeTTL)
+		return
+	}
+
 	config.cacheLineSize, ok = parseUint64(configFileMap, "cache_line_size", uint64(1048576))
 	if !ok {
 		err = errors.New("bad cache_line_size value")
@@ -672,6 +692,12 @@ func checkConfigFile() (err error) {
 	config.cacheLines, ok = parseUint64(configFileMap, "cache_lines", uint64(4096))
 	if !ok {
 		err = errors.New("bad cache_lines value")
+		return
+	}
+
+	config.cacheLinesToPrefetch, ok = parseUint64(configFileMap, "cache_lines_to_prefetch", uint64(4))
+	if !ok {
+		err = errors.New("bad cache_lines_to_prefetch value")
 		return
 	}
 
@@ -776,6 +802,7 @@ func checkConfigFile() (err error) {
 		config.observability = obs
 	}
 
+	// Note: validation of endpoint, if != "", is performed in startHTTPHandler() rather than here.
 	config.endpoint, ok = parseString(configFileMap, "endpoint", "")
 	if !ok {
 		err = errors.New("bad endpoint value")
@@ -1230,6 +1257,16 @@ func checkConfigFile() (err error) {
 			return
 		}
 
+		if globals.config.virtualDirTTL != config.virtualDirTTL {
+			err = errors.New("cannot change virtual_dir_ttl via SIGHUP")
+			return
+		}
+
+		if globals.config.virtualFileTTL != config.virtualFileTTL {
+			err = errors.New("cannot change virtual_file_ttl via SIGHUP")
+			return
+		}
+
 		if globals.config.cacheLineSize != config.cacheLineSize {
 			err = errors.New("cannot change cache_line_size via SIGHUP")
 			return
@@ -1237,6 +1274,11 @@ func checkConfigFile() (err error) {
 
 		if globals.config.cacheLines != config.cacheLines {
 			err = errors.New("cannot change cache_lines via SIGHUP")
+			return
+		}
+
+		if globals.config.cacheLinesToPrefetch != config.cacheLinesToPrefetch {
+			err = errors.New("cannot change cache_lines_to_prefetch via SIGHUP")
 			return
 		}
 

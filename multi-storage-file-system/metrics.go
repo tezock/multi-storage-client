@@ -30,6 +30,7 @@ type fissionMetricsStruct struct {
 	ReadCacheHits               prometheus.Counter
 	ReadCacheMisses             prometheus.Counter
 	ReadCacheWaits              prometheus.Counter
+	ReadCachePrefetches         prometheus.Counter
 	StatFSCalls                 prometheus.Counter // Only applicable to globals.fissionMetrics
 	ReleaseSuccesses            prometheus.Counter
 	ReleaseFailures             prometheus.Counter
@@ -158,6 +159,10 @@ func newFissionMetrics() (fissionMetrics *fissionMetricsStruct) {
 		ReadCacheWaits: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "fission_read_cache_waits_total",
 			Help: "Total number of Read operation triggered cache waits",
+		}),
+		ReadCachePrefetches: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "fission_read_cache_prefetches_total",
+			Help: "Total number of Read operation triggered cache prefetches",
 		}),
 
 		StatFSCalls: prometheus.NewCounter(prometheus.CounterOpts{

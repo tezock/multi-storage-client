@@ -397,8 +397,9 @@ func statDirectoryWrapper(backendContext backendContextIf, statDirectoryInput *s
 
 	statDirectoryOutput, err = backendContext.statDirectory(statDirectoryInput)
 
+	latency = time.Since(startTime).Seconds()
+
 	go func(backend *backendStruct, latency float64) {
-		latency = time.Since(startTime).Seconds()
 		globals.Lock()
 		if err == nil {
 			globals.backendMetrics.StatDirectorySuccesses.Inc()

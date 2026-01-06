@@ -170,18 +170,22 @@ func (*globalsStruct) DoLookup(inHeader *fission.InHeader, lookupIn *fission.Loo
 	}
 
 	if parentInode.inodeType == FUSERootDir {
-		// If lookupIn.Name exists, it is in parentInode.virtChildDirMap
+		// If lookupIn.Name exists, it is in parentInode.childDirMap
 
-		childInodeNumber, ok = parentInode.virtChildDirMap.GetByKey(string(lookupIn.Name))
+		childInodeNumber, ok = parentInode.physChildInodeMap.GetByKey(string(lookupIn.Name))
 		if !ok {
-			globals.Unlock()
-			errno = syscall.ENOENT
-			return
+			childInodeNumber, ok = parentInode.virtChildInodeMap.GetByKey(string(lookupIn.Name))
+			if !ok {
+				globals.Unlock()
+				errno = syscall.ENOENT
+				return
+			}
 		}
 
 		childInode, ok = globals.inodeMap[childInodeNumber]
 		if !ok {
-			globals.logger.Fatalf("[FATAL] globals.inodeMap[childInodeNumber] returned !ok")
+			dumpStack()
+			globals.logger.Fatalf("[FATAL] globals.inodeMap[childInodeNumber] returned !ok [DoLookup()]")
 		}
 	} else {
 		// We only know parentInode is a BackendRootDir or a PseudoDir
@@ -295,6 +299,7 @@ func (*globalsStruct) DoGetAttr(inHeader *fission.InHeader, getAttrIn *fission.G
 		uid = uint32(thisInode.backend.uid)
 		gid = uint32(thisInode.backend.gid)
 	default:
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] unrecognized inodeType (%v)", thisInode.inodeType)
 	}
 
@@ -569,6 +574,14 @@ func (*globalsStruct) DoRead(inHeader *fission.InHeader, readIn *fission.ReadIn)
 			return
 		}
 
+		if curOffset >= inode.sizeInBackend {
+			// We have reached EOF
+
+			globals.Unlock()
+
+			break
+		}
+
 		cacheLineNumber = curOffset / globals.config.cacheLineSize
 
 		cacheLine, ok = inode.cache[cacheLineNumber]
@@ -583,7 +596,7 @@ func (*globalsStruct) DoRead(inHeader *fission.InHeader, readIn *fission.ReadIn)
 
 			cacheLine = &cacheLineStruct{
 				state:       CacheLineInbound,
-				waiters:     make([]*sync.WaitGroup, 1, 1),
+				waiters:     make([]*sync.WaitGroup, 1),
 				inodeNumber: inode.inodeNumber,
 				lineNumber:  cacheLineNumber,
 			}
@@ -596,6 +609,10 @@ func (*globalsStruct) DoRead(inHeader *fission.InHeader, readIn *fission.ReadIn)
 			globals.inboundCacheLineCount++
 
 			go cacheLine.fetch()
+
+			if globals.config.cacheLinesToPrefetch > 0 {
+				go cachePrefetch(inode.inodeNumber, cacheLineNumber)
+			}
 
 			globals.Unlock()
 
@@ -926,15 +943,16 @@ func (inode *inodeStruct) appendToReadDirOut(readDirInSize uint64, readDirOut *f
 // `DoReadDir` implements the package fission callback to enumerate a directory inode's entries (non-verbosely).
 func (*globalsStruct) DoReadDir(inHeader *fission.InHeader, readDirIn *fission.ReadDirIn) (readDirOut *fission.ReadDirOut, errno syscall.Errno) {
 	var (
+		childDirMapIndex                            int
+		childDirMapLen                              uint64
 		childInode                                  *inodeStruct
 		childInodeBasename                          string
 		childInodeNumber                            uint64
 		curOffset                                   uint64
-		curOffsetInNextListDirectoryOutputCap       uint64
 		curOffsetInListDirectorySubdirectoryListCap uint64
+		curOffsetInNextListDirectoryOutputCap       uint64
 		curOffsetInPrevListDirectoryOutputCap       uint64
-		curOffsetInVirtChildDirMapCap               uint64
-		curOffsetInVirtChildFileMapCap              uint64
+		curOffsetInVirtChildInodeMapCap             uint64
 		curReadDirOutSize                           uint64
 		dirEntCountMax                              uint64
 		dirEntMinSize                               uint64
@@ -948,9 +966,7 @@ func (*globalsStruct) DoReadDir(inHeader *fission.InHeader, readDirIn *fission.R
 		parentInode                                 *inodeStruct
 		startTime                                   = time.Now()
 		subdirectory                                string
-		virtChildDirMapIndex                        int
-		virtChildDirMapLen                          uint64
-		virtChildFileMapIndex                       int
+		virtChildInodeMapIndex                      int
 	)
 
 	defer func() {
@@ -1011,24 +1027,26 @@ Restart:
 	}
 
 	if parentInode.inodeType == FUSERootDir {
-		virtChildDirMapLen = uint64(parentInode.virtChildDirMap.Len()) // Will be == 2 + len(globals.config.backends)
+		childDirMapLen = uint64(parentInode.virtChildInodeMap.Len()) // Will be == 2 + len(globals.config.backends)
 
 		for {
-			if curOffset >= virtChildDirMapLen {
+			if curOffset >= childDirMapLen {
 				globals.Unlock()
 				errno = 0
 				return
 			}
 
-			virtChildDirMapIndex = int(curOffset)
-			childInodeBasename, childInodeNumber, ok = parentInode.virtChildDirMap.GetByIndex(virtChildDirMapIndex)
+			childDirMapIndex = int(curOffset)
+			childInodeBasename, childInodeNumber, ok = parentInode.virtChildInodeMap.GetByIndex(childDirMapIndex)
 			if !ok {
-				globals.logger.Fatalf("[FATAL] parentInode.virtChildDirMap.GetByIndex(virtChildDirMapIndex < virtChildDirMapLen) returned !ok")
+				dumpStack()
+				globals.logger.Fatalf("[FATAL] parentInode.virtChildInodeMap.GetByIndex(childDirMapIndex < childDirMapLen) returned !ok")
 			}
 
 			childInode, ok = globals.inodeMap[childInodeNumber]
 			if !ok {
-				globals.logger.Fatalf("[FATAL] globals.inodeMap[childInodeNumber] returned !ok")
+				dumpStack()
+				globals.logger.Fatalf("[FATAL] globals.inodeMap[childInodeNumber] returned !ok [DoReadDir() case 1]")
 			}
 
 			curOffset++
@@ -1100,6 +1118,10 @@ Restart:
 				return
 			}
 
+			if (len(listDirectoryOutput.file) > 0) || (len(listDirectoryOutput.subdirectory) > 0) {
+				parentInode.convertToPhysInodeIfNecessary()
+			}
+
 			fh.listDirectorySequenceDone = !listDirectoryOutput.isTruncated
 
 			if fh.prevListDirectoryOutput == nil {
@@ -1116,10 +1138,9 @@ Restart:
 				fh.nextListDirectoryOutputStartingOffset = fh.prevListDirectoryOutputStartingOffset + fh.prevListDirectoryOutputFileLen
 			}
 
-			// Ensure we remember all discovered subdirectories and no longer refer to now physical subdirectories as virtual
+			// Ensure we remember all discovered subdirectories
 
 			for _, subdirectory = range listDirectoryOutput.subdirectory {
-				_ = parentInode.findChildDirInode(subdirectory)
 				_, ok = fh.listDirectorySubdirectorySet[subdirectory]
 				if !ok {
 					fh.listDirectorySubdirectorySet[subdirectory] = struct{}{}
@@ -1134,45 +1155,39 @@ Restart:
 
 		// At this point, we know either we are still reading fh.{prev|next}ListDirectoryOutput's
 		// or we are done with all of them and may proceed to return fh.listDirectorySubdirectoryList
-		// & parentInode.virtChild{Dir|File}Map entries
+		// & parentInode.virtChildInodeMap entries
 
 		curOffsetInPrevListDirectoryOutputCap = fh.nextListDirectoryOutputStartingOffset
 		curOffsetInNextListDirectoryOutputCap = fh.nextListDirectoryOutputStartingOffset + fh.nextListDirectoryOutputFileLen
 		curOffsetInListDirectorySubdirectoryListCap = curOffsetInNextListDirectoryOutputCap + uint64(len(fh.listDirectorySubdirectoryList))
-		curOffsetInVirtChildDirMapCap = curOffsetInListDirectorySubdirectoryListCap + uint64(parentInode.virtChildDirMap.Len())
-		curOffsetInVirtChildFileMapCap = curOffsetInVirtChildDirMapCap + uint64(parentInode.virtChildFileMap.Len())
+		curOffsetInVirtChildInodeMapCap = curOffsetInListDirectorySubdirectoryListCap + uint64(parentInode.virtChildInodeMap.Len())
 
 		switch {
 		case curOffset < curOffsetInPrevListDirectoryOutputCap:
 			listDirectoryOutputFile = &fh.prevListDirectoryOutput.file[curOffset-fh.prevListDirectoryOutputStartingOffset]
 			childInode = parentInode.findChildFileInode(listDirectoryOutputFile.basename, listDirectoryOutputFile.eTag, listDirectoryOutputFile.mTime, listDirectoryOutputFile.size)
+			childInode.convertToPhysInodeIfNecessary()
 			childInodeBasename = childInode.basename
 		case curOffset < curOffsetInNextListDirectoryOutputCap:
 			listDirectoryOutputFile = &fh.nextListDirectoryOutput.file[curOffset-fh.nextListDirectoryOutputStartingOffset]
 			childInode = parentInode.findChildFileInode(listDirectoryOutputFile.basename, listDirectoryOutputFile.eTag, listDirectoryOutputFile.mTime, listDirectoryOutputFile.size)
+			childInode.convertToPhysInodeIfNecessary()
 			childInodeBasename = childInode.basename
 		case curOffset < curOffsetInListDirectorySubdirectoryListCap:
 			childInode = parentInode.findChildDirInode(fh.listDirectorySubdirectoryList[curOffset-curOffsetInNextListDirectoryOutputCap])
+			childInode.convertToPhysInodeIfNecessary()
 			childInodeBasename = childInode.basename
-		case curOffset < curOffsetInVirtChildDirMapCap:
-			virtChildDirMapIndex = int(curOffset - curOffsetInListDirectorySubdirectoryListCap)
-			childInodeBasename, childInodeNumber, ok = parentInode.virtChildDirMap.GetByIndex(virtChildDirMapIndex)
+		case curOffset < curOffsetInVirtChildInodeMapCap:
+			virtChildInodeMapIndex = int(curOffset - curOffsetInListDirectorySubdirectoryListCap)
+			childInodeBasename, childInodeNumber, ok = parentInode.virtChildInodeMap.GetByIndex(virtChildInodeMapIndex)
 			if !ok {
-				globals.logger.Fatalf("[FATAL] parentInode.virtChildDirMap.GetByIndex(virtChildDirMapIndex) returned !ok")
+				dumpStack()
+				globals.logger.Fatalf("[FATAL] parentInode.virtChildInodeMap.GetByIndex(virtChildInodeMapIndex) returned !ok")
 			}
 			childInode, ok = globals.inodeMap[childInodeNumber]
 			if !ok {
-				globals.logger.Fatalf("[FATAL] globals.inodeMap[childInodeNumber] returned !ok")
-			}
-		case curOffset < curOffsetInVirtChildFileMapCap:
-			virtChildFileMapIndex = int(curOffset - curOffsetInVirtChildDirMapCap)
-			childInodeBasename, childInodeNumber, ok = parentInode.virtChildFileMap.GetByIndex(virtChildFileMapIndex)
-			if !ok {
-				globals.logger.Fatalf("[FATAL] parentInode.virtChildFileMap.GetByIndex(virtChildFileMapIndex) returned !ok")
-			}
-			childInode, ok = globals.inodeMap[childInodeNumber]
-			if !ok {
-				globals.logger.Fatalf("[FATAL] globals.inodeMap[childInodeNumber] returned !ok")
+				dumpStack()
+				globals.logger.Fatalf("[FATAL] globals.inodeMap[childInodeNumber] returned !ok [DoReadDir() case 2]")
 			}
 		default:
 			globals.Unlock()
@@ -1413,15 +1428,16 @@ func (inode *inodeStruct) appendToReadDirPlusOut(readDirPlusInSize uint64, readD
 // `DoReadDirPlus` implements the package fission callback to enumerate a directory inode's entries (verbosely).
 func (*globalsStruct) DoReadDirPlus(inHeader *fission.InHeader, readDirPlusIn *fission.ReadDirPlusIn) (readDirPlusOut *fission.ReadDirPlusOut, errno syscall.Errno) {
 	var (
+		childDirMapIndex                            int
+		childDirMapLen                              uint64
 		childInode                                  *inodeStruct
 		childInodeBasename                          string
 		childInodeNumber                            uint64
 		curOffset                                   uint64
-		curOffsetInNextListDirectoryOutputCap       uint64
 		curOffsetInListDirectorySubdirectoryListCap uint64
+		curOffsetInNextListDirectoryOutputCap       uint64
 		curOffsetInPrevListDirectoryOutputCap       uint64
-		curOffsetInVirtChildDirMapCap               uint64
-		curOffsetInVirtChildFileMapCap              uint64
+		curOffsetInVirtChildInodeMapCap             uint64
 		curReadDirPlusOutSize                       uint64
 		dirEntPlusCountMax                          uint64
 		dirEntPlusMinSize                           uint64
@@ -1437,9 +1453,7 @@ func (*globalsStruct) DoReadDirPlus(inHeader *fission.InHeader, readDirPlusIn *f
 		parentInode                                 *inodeStruct
 		startTime                                   = time.Now()
 		subdirectory                                string
-		virtChildDirMapIndex                        int
-		virtChildDirMapLen                          uint64
-		virtChildFileMapIndex                       int
+		virtChildInodeMapIndex                      int
 	)
 
 	defer func() {
@@ -1502,24 +1516,26 @@ Restart:
 	}
 
 	if parentInode.inodeType == FUSERootDir {
-		virtChildDirMapLen = uint64(parentInode.virtChildDirMap.Len()) // Will be == 2 + len(globals.config.backends)
+		childDirMapLen = uint64(parentInode.virtChildInodeMap.Len()) // Will be == 2 + len(globals.config.backends)
 
 		for {
-			if curOffset >= virtChildDirMapLen {
+			if curOffset >= childDirMapLen {
 				globals.Unlock()
 				errno = 0
 				return
 			}
 
-			virtChildDirMapIndex = int(curOffset)
-			childInodeBasename, childInodeNumber, ok = parentInode.virtChildDirMap.GetByIndex(virtChildDirMapIndex)
+			childDirMapIndex = int(curOffset)
+			childInodeBasename, childInodeNumber, ok = parentInode.virtChildInodeMap.GetByIndex(childDirMapIndex)
 			if !ok {
-				globals.logger.Fatalf("[FATAL] parentInode.virtChildDirMap.GetByIndex(virtChildDirMapIndex < virtChildDirMapLen) returned !ok")
+				dumpStack()
+				globals.logger.Fatalf("[FATAL] parentInode.virtChildInodeMap.GetByIndex(childDirMapIndex < childDirMapLen) returned !ok")
 			}
 
 			childInode, ok = globals.inodeMap[childInodeNumber]
 			if !ok {
-				globals.logger.Fatalf("[FATAL] globals.inodeMap[childInodeNumber] returned !ok")
+				dumpStack()
+				globals.logger.Fatalf("[FATAL] globals.inodeMap[childInodeNumber] returned !ok [DoReadDirPlus() case 1]")
 			}
 
 			curOffset++
@@ -1591,6 +1607,10 @@ Restart:
 				return
 			}
 
+			if (len(listDirectoryOutput.file) > 0) || (len(listDirectoryOutput.subdirectory) > 0) {
+				parentInode.convertToPhysInodeIfNecessary()
+			}
+
 			fh.listDirectorySequenceDone = !listDirectoryOutput.isTruncated
 
 			if fh.prevListDirectoryOutput == nil {
@@ -1607,10 +1627,9 @@ Restart:
 				fh.nextListDirectoryOutputStartingOffset = fh.prevListDirectoryOutputStartingOffset + fh.prevListDirectoryOutputFileLen
 			}
 
-			// Ensure we remember all discovered subdirectories and no longer refer to now physical subdirectories as virtual
+			// Ensure we remember all discovered subdirectories
 
 			for _, subdirectory = range listDirectoryOutput.subdirectory {
-				_ = parentInode.findChildDirInode(subdirectory)
 				_, ok = fh.listDirectorySubdirectorySet[subdirectory]
 				if !ok {
 					fh.listDirectorySubdirectorySet[subdirectory] = struct{}{}
@@ -1625,45 +1644,39 @@ Restart:
 
 		// At this point, we know either we are still reading fh.{prev|next}ListDirectoryOutput's
 		// or we are done with all of them and may proceed to return fh.listDirectorySubdirectoryList
-		// & parentInode.virtChild{Dir|File}Map entries
+		// & parentInode.virtChildInodeMap entries
 
 		curOffsetInPrevListDirectoryOutputCap = fh.nextListDirectoryOutputStartingOffset
 		curOffsetInNextListDirectoryOutputCap = fh.nextListDirectoryOutputStartingOffset + fh.nextListDirectoryOutputFileLen
 		curOffsetInListDirectorySubdirectoryListCap = curOffsetInNextListDirectoryOutputCap + uint64(len(fh.listDirectorySubdirectoryList))
-		curOffsetInVirtChildDirMapCap = curOffsetInListDirectorySubdirectoryListCap + uint64(parentInode.virtChildDirMap.Len())
-		curOffsetInVirtChildFileMapCap = curOffsetInVirtChildDirMapCap + uint64(parentInode.virtChildFileMap.Len())
+		curOffsetInVirtChildInodeMapCap = curOffsetInListDirectorySubdirectoryListCap + uint64(parentInode.virtChildInodeMap.Len())
 
 		switch {
 		case curOffset < curOffsetInPrevListDirectoryOutputCap:
 			listDirectoryOutputFile = &fh.prevListDirectoryOutput.file[curOffset-fh.prevListDirectoryOutputStartingOffset]
 			childInode = parentInode.findChildFileInode(listDirectoryOutputFile.basename, listDirectoryOutputFile.eTag, listDirectoryOutputFile.mTime, listDirectoryOutputFile.size)
+			childInode.convertToPhysInodeIfNecessary()
 			childInodeBasename = childInode.basename
 		case curOffset < curOffsetInNextListDirectoryOutputCap:
 			listDirectoryOutputFile = &fh.nextListDirectoryOutput.file[curOffset-fh.nextListDirectoryOutputStartingOffset]
 			childInode = parentInode.findChildFileInode(listDirectoryOutputFile.basename, listDirectoryOutputFile.eTag, listDirectoryOutputFile.mTime, listDirectoryOutputFile.size)
+			childInode.convertToPhysInodeIfNecessary()
 			childInodeBasename = childInode.basename
 		case curOffset < curOffsetInListDirectorySubdirectoryListCap:
 			childInode = parentInode.findChildDirInode(fh.listDirectorySubdirectoryList[curOffset-curOffsetInNextListDirectoryOutputCap])
+			childInode.convertToPhysInodeIfNecessary()
 			childInodeBasename = childInode.basename
-		case curOffset < curOffsetInVirtChildDirMapCap:
-			virtChildDirMapIndex = int(curOffset - curOffsetInListDirectorySubdirectoryListCap)
-			childInodeBasename, childInodeNumber, ok = parentInode.virtChildDirMap.GetByIndex(virtChildDirMapIndex)
+		case curOffset < curOffsetInVirtChildInodeMapCap:
+			virtChildInodeMapIndex = int(curOffset - curOffsetInListDirectorySubdirectoryListCap)
+			childInodeBasename, childInodeNumber, ok = parentInode.virtChildInodeMap.GetByIndex(virtChildInodeMapIndex)
 			if !ok {
-				globals.logger.Fatalf("[FATAL] parentInode.virtChildDirMap.GetByIndex(virtChildDirMapIndex) returned !ok")
+				dumpStack()
+				globals.logger.Fatalf("[FATAL] parentInode.virtChildInodeMap.GetByIndex(virtChildInodeMapIndex) returned !ok")
 			}
 			childInode, ok = globals.inodeMap[childInodeNumber]
 			if !ok {
-				globals.logger.Fatalf("[FATAL] globals.inodeMap[childInodeNumber] returned !ok")
-			}
-		case curOffset < curOffsetInVirtChildFileMapCap:
-			virtChildFileMapIndex = int(curOffset - curOffsetInVirtChildDirMapCap)
-			childInodeBasename, childInodeNumber, ok = parentInode.virtChildFileMap.GetByIndex(virtChildFileMapIndex)
-			if !ok {
-				globals.logger.Fatalf("[FATAL] parentInode.virtChildFileMap.GetByIndex(virtChildFileMapIndex) returned !ok")
-			}
-			childInode, ok = globals.inodeMap[childInodeNumber]
-			if !ok {
-				globals.logger.Fatalf("[FATAL] globals.inodeMap[childInodeNumber] returned !ok")
+				dumpStack()
+				globals.logger.Fatalf("[FATAL] globals.inodeMap[childInodeNumber] returned !ok [DoReadDirPlus() case 2]")
 			}
 		default:
 			globals.Unlock()
@@ -1757,8 +1770,8 @@ func (*globalsStruct) DoStatX(inHeader *fission.InHeader, statXIn *fission.StatX
 	case PseudoDir:
 		uid = uint32(thisInode.backend.uid)
 		gid = uint32(thisInode.backend.gid)
-
 	default:
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] unrecognized inodeType (%v)", thisInode.inodeType)
 	}
 

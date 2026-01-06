@@ -2,12 +2,20 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+const (
+	HTTP_SERVER_READ_TIMEOUT  = 10 * time.Second
+	HTTP_SERVER_WRITE_TIMEOUT = 10 * time.Second
+	HTTP_SERVER_IDLE_TIMEOUT  = 10 * time.Second
 )
 
 func startHTTPHandler() {
@@ -23,6 +31,7 @@ func startHTTPHandler() {
 
 	parsedURL, err = url.Parse(globals.config.endpoint)
 	if err != nil {
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] url.Parse(globals.config.endpoint) failed: %v\n", err)
 	}
 
@@ -30,23 +39,38 @@ func startHTTPHandler() {
 	case "http":
 		// ok
 	case "https":
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] globals.config.endpoint specifies .Scheme: \"https\" - not currently supported")
 	default:
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] url.Parse(globals.config.endpoint) returned invalid .Scheme: \"%s\"", parsedURL.Scheme)
 	}
 
 	if (parsedURL.Path != "") && (parsedURL.Path != "/") {
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] url.Parse(globals.config.endpoint) returned non-empty .Path: \"%s\"", parsedURL.Path)
 	}
 
 	go func(parsedURL *url.URL) {
 		var (
-			err error
+			err                    error
+			httpServer             *http.Server
+			httpServerLoggerLogger = log.New(globals.logger.Writer(), "[HTTP-SERVER] ", globals.logger.Flags()) // set prefix to differentiate httpServer logging
 		)
 
-		err = http.ListenAndServe(parsedURL.Host, &globals)
+		httpServer = &http.Server{
+			Addr:         parsedURL.Host,
+			Handler:      &globals,
+			ReadTimeout:  HTTP_SERVER_READ_TIMEOUT,
+			WriteTimeout: HTTP_SERVER_WRITE_TIMEOUT,
+			IdleTimeout:  HTTP_SERVER_IDLE_TIMEOUT,
+			ErrorLog:     httpServerLoggerLogger,
+		}
+
+		err = httpServer.ListenAndServe()
 		if err != nil {
-			globals.logger.Fatalf("[FATAL]  http.ListenAndServe() failed: %v", err)
+			dumpStack()
+			globals.logger.Fatalf("[FATAL] httpServer.ListenAndServe() failed: %v", err)
 		}
 	}(parsedURL)
 
@@ -113,10 +137,22 @@ func (*globalsStruct) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprintf(w, "unknown endpoint - must be one of:\n")
+		fmt.Fprintf(w, "  /backends\n")
+		fmt.Fprintf(w, "  /metrics\n")
+		globals.Lock()
+		for _, backend = range globals.config.backends {
+			fmt.Fprintf(w, "  /metrics/%s\n", backend.dirName)
+		}
+		globals.Unlock()
 	}
 }
 
 func registerFissionMetrics(registry *prometheus.Registry, m *fissionMetricsStruct) {
+	if m == nil {
+		dumpStack()
+		globals.logger.Fatalf("[FATAL] registerFissionMetrics() passed a nil *fissionMetricsStruct")
+	}
 	registry.MustRegister(m.LookupSuccesses)
 	registry.MustRegister(m.LookupFailures)
 	registry.MustRegister(m.LookupSuccessLatencies)
@@ -138,6 +174,7 @@ func registerFissionMetrics(registry *prometheus.Registry, m *fissionMetricsStru
 	registry.MustRegister(m.ReadCacheHits)
 	registry.MustRegister(m.ReadCacheMisses)
 	registry.MustRegister(m.ReadCacheWaits)
+	registry.MustRegister(m.ReadCachePrefetches)
 	registry.MustRegister(m.StatFSCalls)
 	registry.MustRegister(m.ReleaseSuccesses)
 	registry.MustRegister(m.ReleaseFailures)
@@ -166,6 +203,10 @@ func registerFissionMetrics(registry *prometheus.Registry, m *fissionMetricsStru
 }
 
 func registerBackendMetrics(registry *prometheus.Registry, m *backendMetricsStruct) {
+	if m == nil {
+		dumpStack()
+		globals.logger.Fatalf("[FATAL] registerBackendMetrics() passed a nil *backendMetricsStruct")
+	}
 	registry.MustRegister(m.DeleteFileSuccesses)
 	registry.MustRegister(m.DeleteFileFailures)
 	registry.MustRegister(m.DeleteFileSuccessLatencies)

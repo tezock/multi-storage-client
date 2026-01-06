@@ -89,6 +89,7 @@ func (cacheLine *cacheLineStruct) touch() {
 		globals.dirtyCacheLineLRU.Remove(cacheLine.listElement)
 		cacheLine.listElement = globals.dirtyCacheLineLRU.PushBack(cacheLine)
 	default:
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] cacheLine.state (%v) unexpected", cacheLine.state)
 	}
 }
@@ -114,6 +115,82 @@ func (cacheLine *cacheLineStruct) notifyWaiters() {
 func cacheFull() (isFull bool) {
 	isFull = (globals.inboundCacheLineCount + uint64(globals.cleanCacheLineLRU.Len())) >= globals.config.cacheLines
 	return
+}
+
+func cachePrefetch(inodeNumber, currentCacheLineNumber uint64) {
+	var (
+		cacheLine                       *cacheLineStruct
+		cacheLineNumberMaxInBackend     uint64
+		cacheLinesToPotentiallyPrefetch uint64
+		cachePruneNeeded                bool
+		inode                           *inodeStruct
+		ok                              bool
+		prefetchCacheLinesIssued        uint64
+		prefetchCacheLineNumber         uint64
+		prefetchCacheLineNumberMax      uint64
+		prefetchCacheLineNumberMin      uint64
+	)
+
+	defer func() {
+		if (inode != nil) && (prefetchCacheLinesIssued != 0) {
+			globals.fissionMetrics.ReadCachePrefetches.Add(float64(prefetchCacheLinesIssued))
+
+			if inode.backend != nil {
+				inode.backend.fissionMetrics.ReadCachePrefetches.Add(float64(prefetchCacheLinesIssued))
+			}
+		}
+
+		globals.Unlock()
+
+		if cachePruneNeeded {
+			cachePrune()
+		}
+	}()
+
+	globals.Lock()
+
+	inode, ok = globals.inodeMap[inodeNumber]
+	if !ok {
+		inode = nil
+		return
+	}
+
+	cacheLineNumberMaxInBackend = ((inode.sizeInBackend + globals.config.cacheLineSize - 1) / globals.config.cacheLineSize) - 1
+
+	if cacheLineNumberMaxInBackend >= (currentCacheLineNumber + globals.config.cacheLinesToPrefetch) {
+		cacheLinesToPotentiallyPrefetch = globals.config.cacheLinesToPrefetch
+	} else {
+		cacheLinesToPotentiallyPrefetch = cacheLineNumberMaxInBackend - currentCacheLineNumber
+	}
+
+	if cacheLinesToPotentiallyPrefetch == 0 {
+		return
+	}
+
+	prefetchCacheLineNumberMin = currentCacheLineNumber + 1
+	prefetchCacheLineNumberMax = prefetchCacheLineNumberMin + cacheLinesToPotentiallyPrefetch - 1
+
+	for prefetchCacheLineNumber = prefetchCacheLineNumberMin; prefetchCacheLineNumber <= prefetchCacheLineNumberMax; prefetchCacheLineNumber++ {
+		_, ok = inode.cache[prefetchCacheLineNumber]
+		if !ok {
+			cacheLine = &cacheLineStruct{
+				state:       CacheLineInbound,
+				waiters:     make([]*sync.WaitGroup, 0, 1),
+				inodeNumber: inodeNumber,
+				lineNumber:  prefetchCacheLineNumber,
+			}
+
+			inode.cache[prefetchCacheLineNumber] = cacheLine
+
+			globals.inboundCacheLineCount++
+
+			go cacheLine.fetch()
+
+			prefetchCacheLinesIssued++
+		}
+	}
+
+	cachePruneNeeded = cacheFull()
 }
 
 // `cachePrune` is called to immediately force the cache to make room
@@ -150,16 +227,19 @@ func cachePrune() {
 
 	cacheLineToEvict, ok = listElement.Value.(*cacheLineStruct)
 	if !ok {
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] listElement.Value.(*cacheLineStruct) returned !ok")
 	}
 
 	inode, ok = globals.inodeMap[cacheLineToEvict.inodeNumber]
 	if !ok {
-		globals.logger.Fatalf("[FATAL] globals.inodeMap[cacheLineToEvict.inodeNumber] returned !ok")
+		dumpStack()
+		globals.logger.Fatalf("[FATAL] globals.inodeMap[cacheLineToEvict.inodeNumber] returned !ok [cachePrune()]")
 	}
 
 	_, ok = inode.cache[cacheLineToEvict.lineNumber]
 	if !ok {
+		dumpStack()
 		globals.logger.Fatalf("[FATAL] inode.cache[cacheLineToEvict.lineNumber] returned !ok")
 	}
 
